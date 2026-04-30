@@ -1,53 +1,53 @@
 import os
-import asyncio
-from playwright.async_api import async_playwright
+import requests
+from bs4 import BeautifulSoup
 
-# Recuperiamo la chiave dalle variabili d'ambiente di Railway
 SCRAPERAPI_KEY = os.getenv("SCRAPERAPI_KEY")
 
 async def run_lepe_scan(keyword: str):
     if not SCRAPERAPI_KEY:
-        return {"error": "SCRAPERAPI_KEY non configurata su Railway"}
+        return [{"title": "Errore: SCRAPERAPI_KEY mancante", "price": "0"}]
 
-    async with async_playwright() as p:
-        # Nota: Non serve passare proxy complessi nel browser, 
-        # ScraperAPI gestisce tutto via URL
-        browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
-        page = await browser.new_page()
+    target_url = f"https://www.ebay.it/sch/i.html?_nkw={keyword.replace(' ', '+')}"
+    
+    # Parametri per ScraperAPI: usiamo il rendering per sicurezza
+    params = {
+        'api_key': SCRAPERAPI_KEY,
+        'url': target_url,
+        'render': 'true' 
+    }
 
-        # Costruiamo l'URL di eBay
-        target_url = f"https://www.ebay.it/sch/i.html?_nkw={keyword.replace(' ', '+')}"
+    try:
+        response = requests.get('http://api.scraperapi.com', params=params, timeout=60)
         
-        # Passiamo tramite ScraperAPI con render=true per gestire il JavaScript
-        proxy_url = f"http://api.scraperapi.com?api_key={SCRAPERAPI_KEY}&url={target_url}&render=true"
+        if response.status_code != 200:
+            return [{"title": f"Errore API: {response.status_code}", "price": "N/A"}]
 
-        print(f"Scansione in corso per: {keyword} tramite ScraperAPI...")
-        
-        try:
-            # Tempo di attesa più lungo perché ScraperAPI deve ruotare i proxy
-            await page.goto(proxy_url, timeout=90000)
-            
-            # Aspettiamo che i prodotti siano visibili
-            await page.wait_for_selector(".s-item__title", timeout=20000)
-            
-            items = await page.locator(".s-item__wrapper-section").all()
-            results = []
+        soup = BeautifulSoup(response.text, 'html.parser')
+        results = []
 
-            for item in items[:10]:
-                title = await item.locator(".s-item__title").inner_text()
-                price = await item.locator(".s-item__price").inner_text()
+        # Cerchiamo i contenitori dei prodotti
+        # Usiamo selettori multipli perché eBay cambia spesso le classi
+        items = soup.select('.s-item__info') or soup.select('.s-item__wrapper')
+
+        for item in items[:15]:
+            title_el = item.select_one('.s-item__title')
+            price_el = item.select_one('.s-item__price')
+
+            if title_el and price_el:
+                title = title_el.get_text(strip=True).replace("Nuova inserzione", "")
+                price = price_el.get_text(strip=True)
                 
-                if title and "Risultati per" not in title:
+                # Escludiamo i risultati spazzatura di eBay
+                if "Shop on eBay" not in title and title != "":
                     results.append({
-                        "title": title.replace("Nuova inserzione", "").strip(),
-                        "price": price.strip(),
-                        "source": "eBay via ScraperAPI"
+                        "title": title,
+                        "price": price,
+                        "source": "eBay Professional"
                     })
-            
-            await browser.close()
-            return results
 
-        except Exception as e:
-            await browser.close()
-            print(f"Errore durante la scansione: {e}")
-            return []
+        return results
+
+    except Exception as e:
+        print(f"Errore Scraper: {e}")
+        return []
