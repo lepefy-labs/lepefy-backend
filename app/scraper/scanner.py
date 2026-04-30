@@ -1,10 +1,10 @@
 import asyncio
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth_async
+# Importiamo il modulo base invece della funzione specifica
+import playwright_stealth 
 
 async def run_lepe_scan(keyword: str):
     async with async_playwright() as p:
-        # Avvio browser con flag per evitare il rilevamento
         browser = await p.chromium.launch(
             headless=True, 
             args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled"]
@@ -16,13 +16,17 @@ async def run_lepe_scan(keyword: str):
         
         page = await context.new_page()
         
-        # Applichiamo lo stealth
-        # Se stealth_async dà ancora problemi, usiamo la versione sincrona che spesso è inclusa diversamente
+        # Tentativo di applicare lo stealth usando la funzione dal modulo
         try:
-            await stealth_async(page)
-        except Exception:
-            # Fallback: lo scanner continuerà comunque con i flag del browser sopra
-            print("Stealth_async non disponibile, procedo con i flag standard")
+            # Nelle versioni recenti si usa spesso così:
+            await playwright_stealth.stealth_async(page)
+        except AttributeError:
+            try:
+                # Fallback per altre versioni della libreria
+                from playwright_stealth import stealth_async
+                await stealth_async(page)
+            except Exception as e:
+                print(f"Stealth non applicato: {e}. Procedo con i flag standard.")
 
         # Test su eBay
         search_url = f"https://www.ebay.it/sch/i.html?_nkw={keyword.replace(' ', '+')}"
@@ -33,12 +37,12 @@ async def run_lepe_scan(keyword: str):
         prices = await page.locator(".s-item__price").all_inner_texts()
         
         results = []
-        # Saltiamo il primo elemento (spesso un placeholder di eBay)
-        for i in range(1, min(6, len(titles))):
-            results.append({
-                "title": titles[i].replace("Nuova inserzione", "").strip(),
-                "price": prices[i]
-            })
+        for i in range(1, min(10, len(titles))):
+            if titles[i].strip():
+                results.append({
+                    "title": titles[i].replace("Nuova inserzione", "").strip(),
+                    "price": prices[i]
+                })
         
         await browser.close()
         return results
