@@ -8,52 +8,42 @@ async def run_lepe_scan(keyword: str):
     if not SCRAPERAPI_KEY:
         return [{"title": "Errore: Chiave Mancante", "price": "0"}]
 
-    # Proviamo eBay.com (spesso più permissivo con i proxy rispetto a .it)
-    target_url = f"https://www.ebay.com/sch/i.html?_nkw={keyword.replace(' ', '+')}"
+    # URL per Subito.it (ordinato per i più recenti)
+    target_url = f"https://www.subito.it/annunci-italia/vendita/usato/?q={keyword.replace(' ', '+')}&order=newest"
     
     params = {
         'api_key': SCRAPERAPI_KEY,
         'url': target_url,
-        'render': 'false', # Proviamo 'false' per evitare conflitti di rendering JS
-        'country_code': 'it' # Chiediamo a ScraperAPI di usare un IP italiano
+        'render': 'true', # Subito carica i prezzi via JS, quindi serve render
+        'country_code': 'it'
     }
 
     try:
         response = requests.get('http://api.scraperapi.com', params=params, timeout=60)
-        
-        # DEBUG: Stampiamo i primi 500 caratteri dell'HTML nei log di Railway
-        print(f"HTML Preview: {response.text[:500]}")
-
         soup = BeautifulSoup(response.text, 'html.parser')
         results = []
 
-        # eBay usa spesso questi selettori per i titoli:
-        # 1. .s-item__title
-        # 2. h3.s-item__title
-        items = soup.find_all("div", class_="s-item__info")
+        # Selettore per le card di Subito.it
+        # Cerchiamo i div che contengono le informazioni dell'annuncio
+        items = soup.find_all("div", class_=lambda x: x and 'item-key-data' in x) or \
+                soup.select('div[class*="SmallCard-module_card-contents"]')
 
-        for item in items:
-            title_el = item.find("span", role="heading") or item.find("div", class_="s-item__title")
-            price_el = item.find("span", class_="s-item__price")
+        for item in items[:15]:
+            # Subito usa classi che contengono nomi descrittivi
+            title_el = item.find("h2") or item.select_one('h2[class*="ItemTitle"]')
+            price_el = item.select_one('p[class*="price"]') or item.find("p", class_=lambda x: x and 'price' in x)
 
-            if title_el and price_el:
+            if title_el:
                 title = title_el.get_text(strip=True)
-                price = price_el.get_text(strip=True)
+                price = price_el.get_text(strip=True) if price_el else "N/D"
                 
-                if "Shop on eBay" not in title and len(title) > 5:
-                    results.append({
-                        "title": title,
-                        "price": price,
-                        "source": "eBay Debug"
-                    })
-
-        # Se ancora vuoto, proviamo un selettore ultra-generico
-        if not results:
-            titles = soup.select(".s-item__title")
-            for t in titles[:5]:
-                results.append({"title": t.get_text(), "price": "Check Log"})
+                results.append({
+                    "title": title,
+                    "price": price,
+                    "source": "Subito.it"
+                })
 
         return results
 
     except Exception as e:
-        return [{"title": "Errore Exception", "price": str(e)}]
+        return [{"title": "Errore Tecnico", "price": str(e)}]
