@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+playwright
+playwright-stealth
+sqlalchemy
+psycopg2-binary
+python-dotenv
+stripe
