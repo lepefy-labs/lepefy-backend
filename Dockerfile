@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 
-# Installazione dipendenze di sistema per i browser
+# Installazione dipendenze di sistema aggiornate per Debian Trixie
 RUN apt-get update && apt-get install -y \
     libnss3 \
     libnspr4 \
@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y \
     libxdamage1 \
     libxext6 \
     libxfixes3 \
-    librandr2 \
+    libxrandr2 \
     libgbm1 \
     libasound2 \
     libpangocairo-1.0-0 \
@@ -21,12 +21,14 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
+# Copia e installazione dei requisiti Python
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Installazione dei browser di Playwright
+# Installazione dei browser di Playwright (Chromium)
 RUN playwright install --with-deps chromium
 
 COPY . .
 
+# Comando per avviare FastAPI
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
