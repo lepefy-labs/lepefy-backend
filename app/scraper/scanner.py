@@ -6,48 +6,54 @@ SCRAPERAPI_KEY = os.getenv("SCRAPERAPI_KEY")
 
 async def run_lepe_scan(keyword: str):
     if not SCRAPERAPI_KEY:
-        return [{"title": "Errore: SCRAPERAPI_KEY mancante", "price": "0"}]
+        return [{"title": "Errore: Chiave Mancante", "price": "0"}]
 
-    target_url = f"https://www.ebay.it/sch/i.html?_nkw={keyword.replace(' ', '+')}"
+    # Proviamo eBay.com (spesso più permissivo con i proxy rispetto a .it)
+    target_url = f"https://www.ebay.com/sch/i.html?_nkw={keyword.replace(' ', '+')}"
     
-    # Parametri per ScraperAPI: usiamo il rendering per sicurezza
     params = {
         'api_key': SCRAPERAPI_KEY,
         'url': target_url,
-        'render': 'true' 
+        'render': 'false', # Proviamo 'false' per evitare conflitti di rendering JS
+        'country_code': 'it' # Chiediamo a ScraperAPI di usare un IP italiano
     }
 
     try:
         response = requests.get('http://api.scraperapi.com', params=params, timeout=60)
         
-        if response.status_code != 200:
-            return [{"title": f"Errore API: {response.status_code}", "price": "N/A"}]
+        # DEBUG: Stampiamo i primi 500 caratteri dell'HTML nei log di Railway
+        print(f"HTML Preview: {response.text[:500]}")
 
         soup = BeautifulSoup(response.text, 'html.parser')
         results = []
 
-        # Cerchiamo i contenitori dei prodotti
-        # Usiamo selettori multipli perché eBay cambia spesso le classi
-        items = soup.select('.s-item__info') or soup.select('.s-item__wrapper')
+        # eBay usa spesso questi selettori per i titoli:
+        # 1. .s-item__title
+        # 2. h3.s-item__title
+        items = soup.find_all("div", class_="s-item__info")
 
-        for item in items[:15]:
-            title_el = item.select_one('.s-item__title')
-            price_el = item.select_one('.s-item__price')
+        for item in items:
+            title_el = item.find("span", role="heading") or item.find("div", class_="s-item__title")
+            price_el = item.find("span", class_="s-item__price")
 
             if title_el and price_el:
-                title = title_el.get_text(strip=True).replace("Nuova inserzione", "")
+                title = title_el.get_text(strip=True)
                 price = price_el.get_text(strip=True)
                 
-                # Escludiamo i risultati spazzatura di eBay
-                if "Shop on eBay" not in title and title != "":
+                if "Shop on eBay" not in title and len(title) > 5:
                     results.append({
                         "title": title,
                         "price": price,
-                        "source": "eBay Professional"
+                        "source": "eBay Debug"
                     })
+
+        # Se ancora vuoto, proviamo un selettore ultra-generico
+        if not results:
+            titles = soup.select(".s-item__title")
+            for t in titles[:5]:
+                results.append({"title": t.get_text(), "price": "Check Log"})
 
         return results
 
     except Exception as e:
-        print(f"Errore Scraper: {e}")
-        return []
+        return [{"title": "Errore Exception", "price": str(e)}]
