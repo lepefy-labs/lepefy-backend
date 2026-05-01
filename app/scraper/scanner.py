@@ -16,7 +16,9 @@ def run_lepe_scan(keyword: str, max_results: int = 15):
 
         # 2. Prepariamo i parametri per ScraperAPI
         # keep_headers=true dice a ScraperAPI di usare i nostri headers
-        final_api_url = f"http://api.scraperapi.com/?api_key={SCRAPERAPI_KEY}&url={encoded_url}&country_code=it&keep_headers=true"
+        #final_api_url = f"http://api.scraperapi.com/?api_key={SCRAPERAPI_KEY}&url={encoded_url}&country_code=it&keep_headers=true"
+        # Aggiungi &premium=true e &render=true per simulare un browser umano completo
+        final_api_url = f"http://api.scraperapi.com/?api_key={SCRAPERAPI_KEY}&url={encoded_url}&country_code=it&keep_headers=true&premium=true&render=true"
         
         # 3. Headers che "simulano" una richiesta legittima dall'App/Sito di Subito
         headers = {
