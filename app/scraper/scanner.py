@@ -1,61 +1,53 @@
 import os
 import requests
 import urllib.parse
+from bs4 import BeautifulSoup
 
 SCRAPERAPI_KEY = os.getenv("SCRAPERAPI_KEY")
-SUBITO_API = "https://www.subito.it/hades/v1/search/items/"
 
 def run_lepe_scan(keyword: str, max_results: int = 15):
     try:
         if not SCRAPERAPI_KEY:
             return [{"title": "Errore", "price": "Chiave ScraperAPI mancante"}]
 
-        # 1. Costruiamo l'URL target
-        target_url = f"{SUBITO_API}?q={keyword}&lim={max_results}&sort=datedesc&t=s"
+        # URL di ricerca Vinted Italia
+        target_url = f"https://www.vinted.it/catalog?search_text={keyword.replace(' ', '+')}&order=newest_first"
         encoded_url = urllib.parse.quote(target_url)
 
-        # 2. Prepariamo i parametri per ScraperAPI
-        # keep_headers=true dice a ScraperAPI di usare i nostri headers
-        #final_api_url = f"http://api.scraperapi.com/?api_key={SCRAPERAPI_KEY}&url={encoded_url}&country_code=it&keep_headers=true"
-        # Aggiungi &premium=true e &render=true per simulare un browser umano completo
-        final_api_url = f"http://api.scraperapi.com/?api_key={SCRAPERAPI_KEY}&url={encoded_url}&country_code=it&keep_headers=true&premium=true&render=true"
+        # Usiamo PREMIUM e RENDER per Vinted, altrimenti ci blocca subito
+        final_api_url = f"http://api.scraperapi.com/?api_key={SCRAPERAPI_KEY}&url={encoded_url}&country_code=it&premium=true&render=true"
         
-        # 3. Headers che "simulano" una richiesta legittima dall'App/Sito di Subito
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Accept": "application/json",
-            "Referer": "https://www.subito.it/"
-        }
+        print(f"DEBUG - Scansione Vinted per: {keyword}")
 
-        print(f"DEBUG - Tentativo finale con keep_headers su: {target_url}")
-
-        response = requests.get(final_api_url, headers=headers, timeout=30)
+        response = requests.get(final_api_url, timeout=60)
         
         if response.status_code != 200:
-            # Se dà ancora 404, proviamo a capire se è ScraperAPI o Subito
-            print(f"DEBUG - Fallimento ({response.status_code}): {response.text[:200]}")
-            return [{"title": f"Errore {response.status_code}", "price": "Controlla Logs", "source": "ScraperAPI"}]
+            return [{"title": f"Errore {response.status_code}", "price": "ScraperAPI Block", "source": "Vinted"}]
 
-        data = response.json()
+        soup = BeautifulSoup(response.text, 'html.parser')
         results = []
 
-        for ad in data.get("ads", []):
-            price_str = "N/D"
-            for feature in ad.get("features", []):
-                if feature.get("uri") == "/price":
-                    values = feature.get("values", [])
-                    price_str = values[0].get("value", "N/D") if values else "N/D"
-                    break
+        # Cerchiamo i contenitori dei prodotti su Vinted
+        # Nota: Vinted usa classi che possono cambiare, usiamo selettori basati su attributi comuni
+        items = soup.select('[data-testid^="grid-item"]')
 
-            results.append({
-                "title": ad.get("subject", "N/D"),
-                "price": price_str,
-                "location": ad.get("geo", {}).get("city", {}).get("value", "N/D"),
-                "url": ad.get("urls", {}).get("default", ""),
-                "source": "Subito API",
-            })
-        
+        for item in items[:max_results]:
+            # Estrazione Titolo (spesso nell'alt dell'immagine o in un titolo specifico)
+            title_el = item.select_one('.feed-grid__item-title') or item.select_one('title')
+            # Estrazione Prezzo
+            price_el = item.select_one('[data-testid="grid-item-price"]') or item.find(text=lambda t: '€' in t)
+            # Estrazione Link
+            link_el = item.select_one('a[href*="/items/"]')
+
+            if title_el and price_el:
+                results.append({
+                    "title": title_el.get_text(strip=True),
+                    "price": price_el.get_text(strip=True),
+                    "url": "https://www.vinted.it" + link_el['href'] if link_el else "N/D",
+                    "source": "Vinted"
+                })
+
         return results
 
     except Exception as e:
-        return [{"title": "Errore", "price": str(e), "source": "Scanner"}]
+        return [{"title": "Errore Tecnico", "price": str(e), "source": "Vinted"}]
