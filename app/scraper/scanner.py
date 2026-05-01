@@ -1,8 +1,8 @@
 import os
 import requests
+import urllib.parse
 
 SCRAPERAPI_KEY = os.getenv("SCRAPERAPI_KEY")
-# URL base senza parametri aggiuntivi
 SUBITO_API = "https://www.subito.it/hades/v1/search/items/"
 
 def run_lepe_scan(keyword: str, max_results: int = 15):
@@ -10,25 +10,29 @@ def run_lepe_scan(keyword: str, max_results: int = 15):
         if not SCRAPERAPI_KEY:
             return [{"title": "Errore", "price": "Chiave ScraperAPI mancante"}]
 
-        # Costruiamo l'URL di destinazione con i parametri di Subito già inclusi
-        # ma lo passiamo come stringa semplice a ScraperAPI
+        # 1. Costruiamo l'URL target
         target_url = f"{SUBITO_API}?q={keyword}&lim={max_results}&sort=datedesc&t=s"
+        encoded_url = urllib.parse.quote(target_url)
 
-        # Parametri per ScraperAPI
-        payload = {
-            "api_key": SCRAPERAPI_KEY,
-            "url": target_url,
-            "country_code": "it",
-            "render": "false"
+        # 2. Prepariamo i parametri per ScraperAPI
+        # keep_headers=true dice a ScraperAPI di usare i nostri headers
+        final_api_url = f"http://api.scraperapi.com/?api_key={SCRAPERAPI_KEY}&url={encoded_url}&country_code=it&keep_headers=true"
+        
+        # 3. Headers che "simulano" una richiesta legittima dall'App/Sito di Subito
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+            "Referer": "https://www.subito.it/"
         }
+
+        print(f"DEBUG - Tentativo finale con keep_headers su: {target_url}")
+
+        response = requests.get(final_api_url, headers=headers, timeout=30)
         
-        # Chiamata diretta
-        response = requests.get("http://api.scraperapi.com", params=payload, timeout=30)
-        
-        # Se ScraperAPI dà ancora 404, stampiamo l'URL per debuggare nei log di Railway
         if response.status_code != 200:
-            print(f"DEBUG - ScraperAPI URL inviato: {response.url}")
-            response.raise_for_status()
+            # Se dà ancora 404, proviamo a capire se è ScraperAPI o Subito
+            print(f"DEBUG - Fallimento ({response.status_code}): {response.text[:200]}")
+            return [{"title": f"Errore {response.status_code}", "price": "Controlla Logs", "source": "ScraperAPI"}]
 
         data = response.json()
         results = []
