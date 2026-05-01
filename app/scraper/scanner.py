@@ -2,43 +2,34 @@ import os
 import requests
 
 SCRAPERAPI_KEY = os.getenv("SCRAPERAPI_KEY")
-
-# Subito.it espone un'API JSON interna usata dal suo frontend.
-# È molto più stabile dello scraping HTML (niente class name hashate, niente JS render).
+# URL base senza parametri aggiuntivi
 SUBITO_API = "https://www.subito.it/hades/v1/search/items/"
 
 def run_lepe_scan(keyword: str, max_results: int = 15):
-    # 1. Definiamo i parametri originali per Subito
-    subito_params = {
-        "q": keyword,
-        "lim": max_results,
-        "start": 0,
-        "sort": "datedesc",
-        "t": "s",
-    }
-
     try:
-        if SCRAPERAPI_KEY:
-            # Creiamo l'URL di Subito pulito con i suoi parametri
-            # Usiamo un sistema più robusto per generare l'URL target
-            target_req = requests.Request('GET', SUBITO_API, params=subito_params).prepare()
-            target_url = target_req.url
+        if not SCRAPERAPI_KEY:
+            return [{"title": "Errore", "price": "Chiave ScraperAPI mancante"}]
 
-            # Parametri per ScraperAPI
-            payload = {
-                "api_key": SCRAPERAPI_KEY,
-                "url": target_url,
-                "country_code": "it"
-            }
-            
-            # Chiamata a ScraperAPI: i parametri vanno passati nel dizionario 'params'
-            response = requests.get("http://api.scraperapi.com", params=payload, timeout=30)
-        else:
-            # Fallback locale senza proxy
-            headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-            response = requests.get(SUBITO_API, params=subito_params, headers=headers, timeout=15)
+        # Costruiamo l'URL di destinazione con i parametri di Subito già inclusi
+        # ma lo passiamo come stringa semplice a ScraperAPI
+        target_url = f"{SUBITO_API}?q={keyword}&lim={max_results}&sort=datedesc&t=s"
 
-        response.raise_for_status()
+        # Parametri per ScraperAPI
+        payload = {
+            "api_key": SCRAPERAPI_KEY,
+            "url": target_url,
+            "country_code": "it",
+            "render": "false"
+        }
+        
+        # Chiamata diretta
+        response = requests.get("http://api.scraperapi.com", params=payload, timeout=30)
+        
+        # Se ScraperAPI dà ancora 404, stampiamo l'URL per debuggare nei log di Railway
+        if response.status_code != 200:
+            print(f"DEBUG - ScraperAPI URL inviato: {response.url}")
+            response.raise_for_status()
+
         data = response.json()
         results = []
 
@@ -57,7 +48,8 @@ def run_lepe_scan(keyword: str, max_results: int = 15):
                 "url": ad.get("urls", {}).get("default", ""),
                 "source": "Subito API",
             })
+        
         return results
 
     except Exception as e:
-        return [{"title": "Errore", "price": str(e), "source": "Subito.it"}]
+        return [{"title": "Errore", "price": str(e), "source": "Scanner"}]
