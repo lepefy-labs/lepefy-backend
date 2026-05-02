@@ -1,8 +1,27 @@
+import os
+import json
+import asyncio
+import requests
+from bs4 import BeautifulSoup
+from fastapi import FastAPI
+from app.scraper.scanner import run_lepe_scan
+
+app = FastAPI(title="Lepefy Backend API")
+
+@app.get("/")
+def read_root():
+    return {"message": "Welcome to Lepefy API - Connection Active"}
+
+@app.get("/test-scan")
+async def test_scan(q: str = "Nikon Z6"):
+    try:
+        data = await run_lepe_scan(q)
+        return {"status": "success", "keyword": q, "found_items": data}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
 @app.get("/debug-scan")
 async def debug_scan(q: str = "ThinkPad"):
-    import json, asyncio, requests
-    from bs4 import BeautifulSoup
-
     def _debug_fetch():
         search_url = f"https://www.subito.it/annunci-italia/vendita/usato/?q={q}&sort=date_desc"
         params = {
@@ -17,7 +36,6 @@ async def debug_scan(q: str = "ThinkPad"):
         if not tag:
             return {"error": "__NEXT_DATA__ non trovato", "html_preview": r.text[:500]}
         data = json.loads(tag.string)
-        # Ritorna solo la struttura delle chiavi, non i dati interi
         def map_keys(d, depth=4):
             if depth == 0: return "..."
             if isinstance(d, dict): return {k: map_keys(v, depth-1) for k, v in list(d.items())[:10]}
