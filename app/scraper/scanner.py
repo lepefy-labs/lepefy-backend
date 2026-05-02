@@ -40,18 +40,8 @@ def _fetch_subito(keyword: str, max_results: int = 15) -> list[dict]:
         .get("items", {})
     )
 
-    # items può essere un dict con chiave "list" o direttamente una lista
-    if isinstance(items_data, dict):
-        ads_raw = (
-            items_data.get("list") or
-            items_data.get("ads") or
-            items_data.get("data", {}).get("ads", []) or
-            []
-        )
-    elif isinstance(items_data, list):
-        ads_raw = items_data
-    else:
-        ads_raw = []
+    # Path confermato: items.originalList contiene gli annunci
+    ads_raw = items_data.get("originalList", []) if isinstance(items_data, dict) else []
 
     results = []
     for ad in ads_raw[:max_results]:
