@@ -45,7 +45,10 @@ def _fetch_subito(keyword: str, max_results: int = 15) -> list[dict]:
 
     results = []
     for ad in ads_raw[:max_results]:
-        # Estrai prezzo dalle features
+        try:
+            if not isinstance(ad, dict):
+                results.append({"title": "DEBUG: tipo non dict", "price": str(type(ad)), "raw": str(ad)[:300], "source": "Subito.it"})
+                break
         price_str = "N/D"
         for feature in ad.get("features", []):
             if feature.get("uri") == "/price":
@@ -54,23 +57,35 @@ def _fetch_subito(keyword: str, max_results: int = 15) -> list[dict]:
                     price_str = vals[0].get("value", "N/D")
                 break
 
-        geo = ad.get("geo", {})
-        city = geo.get("city", {}).get("value", "")
-        region = geo.get("region", {}).get("value", "")
-        location = f"{city}, {region}".strip(", ")
+            # Estrai prezzo dalle features
+            price_str = "N/D"
+            for feature in ad.get("features", []):
+                if feature.get("uri") == "/price":
+                    vals = feature.get("values", [])
+                    if vals:
+                        price_str = vals[0].get("value", "N/D")
+                    break
 
-        results.append({
-            "title": ad.get("subject", "N/D"),
-            "price": price_str,
-            "location": location,
-            "date": ad.get("date", ""),
-            "url": ad.get("urls", {}).get("default", ""),
-            "source": "Subito.it",
-        })
+            geo = ad.get("geo", {})
+            city = geo.get("city", {}).get("value", "")
+            region = geo.get("region", {}).get("value", "")
+            location = f"{city}, {region}".strip(", ")
 
-    # Se ancora vuoto, ritorna la struttura grezza di items per debug
+            results.append({
+                "title": ad.get("subject", "N/D"),
+                "price": price_str,
+                "location": location,
+                "date": ad.get("date", ""),
+                "url": ad.get("urls", {}).get("default", ""),
+                "source": "Subito.it",
+            })
+        except Exception as e:
+            results.append({"title": "Errore parsing ad", "price": str(e), "raw": str(ad)[:200], "source": "Subito.it"})
+            break
+
     if not results:
-        return [{"title": "DEBUG: struttura items", "price": str(type(items_data)), "raw": str(list(items_data.keys()) if isinstance(items_data, dict) else items_data)[:300], "source": "Subito.it"}]
+        first = ads_raw[0] if ads_raw else "lista vuota"
+        return [{"title": "DEBUG: primo elemento", "price": str(type(first)), "raw": str(first)[:500], "source": "Subito.it"}]
 
     return results
 
