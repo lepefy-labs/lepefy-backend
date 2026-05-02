@@ -128,7 +128,7 @@ def _save_deals(keyword: str, items: list[dict], price_threshold: float) -> int:
             "url": d["url"],
             "date_listed": d["date"] or None,
             "source": d["source"],
-            "is_notified": False,
+            "notified": False,
         }
         for d in deals
     ]
