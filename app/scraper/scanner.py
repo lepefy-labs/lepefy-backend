@@ -13,7 +13,6 @@ def _fetch_subito(keyword: str, max_results: int = 15) -> list[dict]:
         f"https://www.subito.it/annunci-italia/vendita/usato/"
         f"?q={keyword.replace(' ', '+')}&sort=date_desc"
     )
-
     params = {
         "api_key": SCRAPERAPI_KEY,
         "url": search_url,
@@ -30,8 +29,6 @@ def _fetch_subito(keyword: str, max_results: int = 15) -> list[dict]:
 
     next_data = json.loads(next_data_tag.string)
 
-    # Path confermato dalla risposta debug:
-    # props.pageProps.initialState.items
     items_data = (
         next_data
         .get("props", {})
@@ -40,24 +37,20 @@ def _fetch_subito(keyword: str, max_results: int = 15) -> list[dict]:
         .get("items", {})
     )
 
-    # Path confermato: items.originalList contiene gli annunci
     ads_raw = items_data.get("originalList", []) if isinstance(items_data, dict) else []
+
+    # Debug: se il primo elemento non è un dict, mostra la struttura grezza
+    if ads_raw and not isinstance(ads_raw[0], dict):
+        return [{
+            "title": "DEBUG: tipo elemento",
+            "price": str(type(ads_raw[0])),
+            "raw": str(ads_raw[0])[:500],
+            "source": "Subito.it"
+        }]
 
     results = []
     for ad in ads_raw[:max_results]:
         try:
-            if not isinstance(ad, dict):
-                results.append({"title": "DEBUG: tipo non dict", "price": str(type(ad)), "raw": str(ad)[:300], "source": "Subito.it"})
-                break
-        price_str = "N/D"
-        for feature in ad.get("features", []):
-            if feature.get("uri") == "/price":
-                vals = feature.get("values", [])
-                if vals:
-                    price_str = vals[0].get("value", "N/D")
-                break
-
-            # Estrai prezzo dalle features
             price_str = "N/D"
             for feature in ad.get("features", []):
                 if feature.get("uri") == "/price":
@@ -80,12 +73,15 @@ def _fetch_subito(keyword: str, max_results: int = 15) -> list[dict]:
                 "source": "Subito.it",
             })
         except Exception as e:
-            results.append({"title": "Errore parsing ad", "price": str(e), "raw": str(ad)[:200], "source": "Subito.it"})
-            break
+            results.append({
+                "title": "Errore parsing",
+                "price": str(e),
+                "raw": str(ad)[:200],
+                "source": "Subito.it"
+            })
 
     if not results:
-        first = ads_raw[0] if ads_raw else "lista vuota"
-        return [{"title": "DEBUG: primo elemento", "price": str(type(first)), "raw": str(first)[:500], "source": "Subito.it"}]
+        return [{"title": "DEBUG: originalList vuota", "price": "0", "source": "Subito.it"}]
 
     return results
 
