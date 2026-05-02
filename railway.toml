@@ -1,0 +1,4 @@
+[[services]]
+name = "scanner-cron"
+cronSchedule = "*/30 * * * *"   # ogni 30 minuti
+startCommand = "curl -s https://lepefy-backend-production.up.railway.app/cron/scan?secret=$CRON_SECRET"
