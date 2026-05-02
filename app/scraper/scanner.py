@@ -7,6 +7,61 @@ from bs4 import BeautifulSoup
 SCRAPERAPI_KEY = os.getenv("SCRAPERAPI_KEY")
 SCRAPERAPI_URL = "http://api.scraperapi.com"
 
+# Imposta True per vedere la struttura grezza del primo annuncio
+DEBUG_FIRST_AD = os.getenv("DEBUG_FIRST_AD", "false").lower() == "true"
+
+
+def _extract_price(ad: dict) -> str:
+    """Prova diverse strutture possibili per il prezzo."""
+    # Struttura 1: features lista di dict con uri/values
+    for feature in ad.get("features", []):
+        if isinstance(feature, dict) and feature.get("uri") == "/price":
+            vals = feature.get("values", [])
+            if vals and isinstance(vals[0], dict):
+                return vals[0].get("value", "N/D")
+            if vals and isinstance(vals[0], str):
+                return vals[0]
+
+    # Struttura 2: price diretta
+    if "price" in ad:
+        p = ad["price"]
+        if isinstance(p, dict):
+            return str(p.get("value", p.get("amount", "N/D")))
+        return str(p)
+
+    # Struttura 3: advertiser/pricing
+    pricing = ad.get("pricing", {})
+    if pricing:
+        return str(pricing.get("value", pricing.get("price", "N/D")))
+
+    return "N/D"
+
+
+def _extract_title(ad: dict) -> str:
+    return ad.get("subject") or ad.get("title") or ad.get("name") or "N/D"
+
+
+def _extract_url(ad: dict) -> str:
+    urls = ad.get("urls", {})
+    if isinstance(urls, dict):
+        return urls.get("default", urls.get("web", ""))
+    urn = ad.get("urn", "")
+    # Prova a costruire URL da urn: "id:ad:UUID:list:ID" -> /annunci/ID
+    if urn:
+        parts = urn.split(":")
+        if len(parts) >= 5:
+            return f"https://www.subito.it/annunci/{parts[-1]}.htm"
+    return ""
+
+
+def _extract_location(ad: dict) -> str:
+    geo = ad.get("geo", {})
+    if isinstance(geo, dict):
+        city = geo.get("city", {}).get("value", "") if isinstance(geo.get("city"), dict) else geo.get("city", "")
+        region = geo.get("region", {}).get("value", "") if isinstance(geo.get("region"), dict) else geo.get("region", "")
+        return f"{city}, {region}".strip(", ")
+    return ""
+
 
 def _fetch_subito(keyword: str, max_results: int = 15) -> list[dict]:
     search_url = (
@@ -36,54 +91,29 @@ def _fetch_subito(keyword: str, max_results: int = 15) -> list[dict]:
         .get("initialState", {})
         .get("items", {})
     )
-
     ads_raw = items_data.get("originalList", []) if isinstance(items_data, dict) else []
 
-    # Debug: se il primo elemento non è un dict, mostra la struttura grezza
-    if ads_raw and not isinstance(ads_raw[0], dict):
-        return [{
-            "title": "DEBUG: tipo elemento",
-            "price": str(type(ads_raw[0])),
-            "raw": str(ads_raw[0])[:500],
-            "source": "Subito.it"
-        }]
+    if not ads_raw:
+        return [{"title": "DEBUG: originalList vuota", "price": "N/D", "source": "Subito.it"}]
+
+    # Debug: dump completo del primo annuncio per capire la struttura
+    if DEBUG_FIRST_AD:
+        return [{"title": "DEBUG FULL AD", "raw": json.dumps(ads_raw[0], ensure_ascii=False)[:2000], "source": "Subito.it"}]
 
     results = []
     for ad in ads_raw[:max_results]:
-        try:
-            price_str = "N/D"
-            for feature in ad.get("features", []):
-                if feature.get("uri") == "/price":
-                    vals = feature.get("values", [])
-                    if vals:
-                        price_str = vals[0].get("value", "N/D")
-                    break
+        if not isinstance(ad, dict):
+            continue
+        results.append({
+            "title": _extract_title(ad),
+            "price": _extract_price(ad),
+            "location": _extract_location(ad),
+            "date": ad.get("date", ""),
+            "url": _extract_url(ad),
+            "source": "Subito.it",
+        })
 
-            geo = ad.get("geo", {})
-            city = geo.get("city", {}).get("value", "")
-            region = geo.get("region", {}).get("value", "")
-            location = f"{city}, {region}".strip(", ")
-
-            results.append({
-                "title": ad.get("subject", "N/D"),
-                "price": price_str,
-                "location": location,
-                "date": ad.get("date", ""),
-                "url": ad.get("urls", {}).get("default", ""),
-                "source": "Subito.it",
-            })
-        except Exception as e:
-            results.append({
-                "title": "Errore parsing",
-                "price": str(e),
-                "raw": str(ad)[:200],
-                "source": "Subito.it"
-            })
-
-    if not results:
-        return [{"title": "DEBUG: originalList vuota", "price": "0", "source": "Subito.it"}]
-
-    return results
+    return results if results else [{"title": "Nessun annuncio estratto", "price": "N/D", "source": "Subito.it"}]
 
 
 async def run_lepe_scan(keyword: str, max_results: int = 15) -> list[dict]:
