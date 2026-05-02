@@ -49,3 +49,18 @@ async def cron_notify(secret: str = ""):
     if secret != os.getenv("CRON_SECRET"):
         return {"error": "unauthorized"}
     return await run_notify_job()
+
+@app.get("/debug-supabase")
+async def debug_supabase():
+    import httpx
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_SERVICE_KEY")
+    async with httpx.AsyncClient() as client:
+        r = await client.get(
+            f"{url}/rest/v1/scan_results?limit=1",
+            headers={
+                "apikey": key,
+                "Authorization": f"Bearer {key}",
+            }
+        )
+        return {"status": r.status_code, "body": r.text}
