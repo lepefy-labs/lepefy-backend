@@ -8,3 +8,4 @@ python-dotenv
 stripe
 beautifulsoup4
 requests
+supabase
