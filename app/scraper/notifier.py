@@ -94,7 +94,7 @@ def _run_notify_job() -> dict:
     1. Legge da scan_results tutti i deal non ancora notificati
     2. Li raggruppa per utente (in futuro: join con tabella users/subscriptions)
     3. Invia una email riepilogativa per utente
-    4. Marca i deal come is_notified=true
+    4. Marca i deal come notified=true
     """
     supabase = _get_supabase()
 
@@ -102,7 +102,7 @@ def _run_notify_job() -> dict:
     response = (
         supabase.table("scan_results")
         .select("*")
-        .eq("is_notified", False)
+        .eq("notified", False)
         .order("created_at", desc=True)
         .limit(50)
         .execute()
@@ -130,7 +130,7 @@ def _run_notify_job() -> dict:
 
     # Marca come notificati
     ids = [d["id"] for d in deals]
-    supabase.table("scan_results").update({"is_notified": True}).in_("id", ids).execute()
+    supabase.table("scan_results").update({"notified": True}).in_("id", ids).execute()
 
     return {
         "status": "ok",
