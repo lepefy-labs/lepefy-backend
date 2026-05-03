@@ -9,3 +9,4 @@ stripe
 beautifulsoup4
 requests
 supabase
+httpx
