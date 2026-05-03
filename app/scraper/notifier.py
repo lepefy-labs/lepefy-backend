@@ -1,25 +1,19 @@
 import os
 import asyncio
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+import httpx
 from supabase import create_client, Client
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
-
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER")       # es. noreply@flipscan.it
-SMTP_PASS = os.getenv("SMTP_PASS")       # app password Gmail o API key SendGrid
-EMAIL_FROM = os.getenv("EMAIL_FROM", SMTP_USER)
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+EMAIL_FROM = os.getenv("EMAIL_FROM", "onboarding@resend.dev")
 
 
 def _get_supabase() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 
-def _build_email_html(deals: list[dict], user_email: str) -> str:
+def _build_email_html(deals: list[dict]) -> str:
     rows = ""
     for d in deals:
         rows += f"""
@@ -76,29 +70,31 @@ def _build_email_html(deals: list[dict], user_email: str) -> str:
 
 
 def _send_email(to: str, subject: str, html: str) -> None:
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = EMAIL_FROM
-    msg["To"] = to
-    msg.attach(MIMEText(html, "html"))
-
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-        server.ehlo()
-        server.starttls()
-        server.login(SMTP_USER, SMTP_PASS)
-        server.sendmail(EMAIL_FROM, to, msg.as_string())
+    response = httpx.post(
+        "https://api.resend.com/emails",
+        headers={
+            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "from": EMAIL_FROM,
+            "to": [to],
+            "subject": subject,
+            "html": html,
+        },
+        timeout=15,
+    )
+    response.raise_for_status()
 
 
 def _run_notify_job() -> dict:
     """
-    1. Legge da scan_results tutti i deal non ancora notificati
-    2. Li raggruppa per utente (in futuro: join con tabella users/subscriptions)
-    3. Invia una email riepilogativa per utente
-    4. Marca i deal come notified=true
+    1. Legge da scan_results i deal con notified=false
+    2. Invia email riepilogativa
+    3. Marca i deal come notified=true
     """
     supabase = _get_supabase()
 
-    # Recupera deal non notificati
     response = (
         supabase.table("scan_results")
         .select("*")
@@ -112,15 +108,11 @@ def _run_notify_job() -> dict:
     if not deals:
         return {"status": "ok", "message": "Nessun deal da notificare"}
 
-    # --- Fase 1: utente singolo (hardcoded) ---
-    # Quando integri Supabase Auth, sostituisci con:
-    # users = supabase.table("subscriptions").select("email").eq("plan","premium").execute()
-    # e raggruppa i deals per keyword/preferenze utente
     notify_email = os.getenv("NOTIFY_EMAIL_OVERRIDE")
     if not notify_email:
         return {"status": "error", "message": "NOTIFY_EMAIL_OVERRIDE non impostata"}
 
-    html = _build_email_html(deals, notify_email)
+    html = _build_email_html(deals)
     subject = f"🔍 FlipScan — {len(deals)} nuovi affari trovati"
 
     try:
