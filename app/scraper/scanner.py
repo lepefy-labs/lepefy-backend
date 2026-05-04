@@ -15,6 +15,10 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
+# Prezzi Haiku per milione di token (aggiornare se cambiano)
+HAIKU_INPUT_COST_PER_M  = 0.80
+HAIKU_OUTPUT_COST_PER_M = 4.00
+
 
 def _get_supabase() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
@@ -64,10 +68,10 @@ def _extract_location(ad: dict) -> str:
     return f"{city_val}, {region_val}".strip(", ")
 
 
-def _score_ad(title: str, price: str, location: str, body: str) -> dict:
+def _score_ad(title: str, price: str, location: str, body: str) -> tuple[dict, dict]:
     """
     Chiama Claude Haiku per valutare l'annuncio.
-    Ritorna score, verdict, valore_stimato, margine_stimato, motivazione, rischi.
+    Ritorna (risultato_ai, usage) dove usage = {"input_tokens": N, "output_tokens": N}.
     """
     prompt = f"""Sei un esperto di elettronica usata e flipping su marketplace italiani (Subito.it).
 
@@ -104,6 +108,7 @@ Valori possibili per verdict: AFFARE (margine>40€), OK (margine 15-40€), EVI
         )
         r.raise_for_status()
         data = r.json()
+        usage = data.get("usage", {})
         text = data["content"][0]["text"].replace("```json", "").replace("```", "").strip()
         result = json.loads(text)
 
@@ -116,7 +121,7 @@ Valori possibili per verdict: AFFARE (margine>40€), OK (margine 15-40€), EVI
                 result["score"] = min(result.get("score", 5), 5)
                 result["verdict"] = "OK"
 
-        return result
+        return result, usage
 
     except Exception as e:
         return {
@@ -126,7 +131,7 @@ Valori possibili per verdict: AFFARE (margine>40€), OK (margine 15-40€), EVI
             "margine_stimato": None,
             "motivazione": f"Scoring non disponibile: {str(e)[:50]}",
             "rischi": "",
-        }
+        }, {}
 
 
 def _fetch_subito(keyword: str, max_results: int = 30) -> list[dict]:
@@ -176,10 +181,11 @@ def _fetch_subito(keyword: str, max_results: int = 30) -> list[dict]:
     return results
 
 
-def _save_deals(keyword: str, items: list[dict], price_threshold: float) -> int:
+def _save_deals(keyword: str, items: list[dict], price_threshold: float) -> dict:
     """
-    Filtra annunci sotto soglia, li valuta con AI e salva su Supabase.
-    Ritorna il numero di record inseriti.
+    Filtra annunci sotto soglia, li valuta con AI, salva su Supabase
+    e logga il consumo token su ai_usage_log.
+    Ritorna un dict con saved count e riepilogo token AI consumati.
     """
     supabase = _get_supabase()
     deals = [
@@ -188,11 +194,16 @@ def _save_deals(keyword: str, items: list[dict], price_threshold: float) -> int:
     ]
 
     if not deals:
-        return 0
+        return {"saved": 0, "tokens": {"input": 0, "output": 0, "cost_usd": 0.0}}
 
+    total_input = 0
+    total_output = 0
     rows = []
+
     for d in deals:
-        ai = _score_ad(d["title"], d["price"], d["location"], d.get("body", ""))
+        ai, usage = _score_ad(d["title"], d["price"], d["location"], d.get("body", ""))
+        total_input += usage.get("input_tokens", 0)
+        total_output += usage.get("output_tokens", 0)
         rows.append({
             "keyword": keyword,
             "title": d["title"],
@@ -209,11 +220,33 @@ def _save_deals(keyword: str, items: list[dict], price_threshold: float) -> int:
             "rischi": ai.get("rischi"),
         })
 
+    cost_usd = (
+        (total_input  / 1_000_000 * HAIKU_INPUT_COST_PER_M) +
+        (total_output / 1_000_000 * HAIKU_OUTPUT_COST_PER_M)
+    )
+
+    # Salva gli annunci
     supabase.table("scan_results").upsert(
         rows, on_conflict="url", ignore_duplicates=True
     ).execute()
 
-    return len(rows)
+    # Log consumo AI
+    supabase.table("ai_usage_log").insert({
+        "keyword": keyword,
+        "input_tokens": total_input,
+        "output_tokens": total_output,
+        "cost_usd": round(cost_usd, 5),
+        "deals_scored": len(deals),
+    }).execute()
+
+    return {
+        "saved": len(rows),
+        "tokens": {
+            "input": total_input,
+            "output": total_output,
+            "cost_usd": round(cost_usd, 5),
+        },
+    }
 
 
 async def run_lepe_scan(keyword: str, max_results: int = 15) -> list[dict]:
@@ -234,13 +267,14 @@ async def run_scan_and_save(keyword: str, price_threshold: float) -> dict:
     """Cron job: scansiona, valuta con AI, filtra sotto soglia, salva su Supabase."""
     try:
         items = await asyncio.to_thread(_fetch_subito, keyword, 30)
-        saved = await asyncio.to_thread(_save_deals, keyword, items, price_threshold)
+        result = await asyncio.to_thread(_save_deals, keyword, items, price_threshold)
         return {
             "status": "ok",
             "keyword": keyword,
             "threshold": price_threshold,
             "found": len(items),
-            "saved": saved,
+            "saved": result["saved"],
+            "ai_usage": result["tokens"],
         }
     except Exception as e:
         return {"status": "error", "keyword": keyword, "detail": str(e)}
