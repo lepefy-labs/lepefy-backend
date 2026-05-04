@@ -73,15 +73,19 @@ def _score_ad(title: str, price: str, location: str, body: str) -> dict:
 
 Annuncio:
 Titolo: {title}
-Prezzo: {price}
+Prezzo richiesto: {price}
 Città: {location}
 Descrizione: {body[:800] if body else 'N/D'}
 
-Valuta se è un buon affare per il flipping. Rispondi SOLO con JSON valido, nessun testo extra:
-{{"score":7,"verdict":"AFFARE","valore_stimato":320,"margine_stimato":70,"motivazione":"Descrizione sintetica della valutazione in max 15 parole","rischi":"Principali rischi in max 10 parole oppure stringa vuota se nessuno"}}
+Stima il valore di rivendita REALE su Subito.it/eBay Italia per questo articolo USATO.
+Sii conservativo: considera spese di spedizione (~6€), commissioni piattaforma (~10%) e tempo.
+Il margine_stimato è: valore_rivendita - prezzo_acquisto - spese_totali.
+Se il margine netto è sotto €15, metti score massimo 4 indipendentemente dal prodotto.
 
-Valori possibili per verdict: AFFARE, OK, EVITA
-Score da 1 a 10 dove 10 è l'affare perfetto."""
+Rispondi SOLO con JSON valido, nessun testo extra:
+{{"score":7,"verdict":"AFFARE","valore_stimato":320,"margine_stimato":70,"motivazione":"max 15 parole","rischi":"max 10 parole"}}
+
+Valori possibili per verdict: AFFARE (margine>40€), OK (margine 15-40€), EVITA (margine<15€ o rischio alto)"""
 
     try:
         r = httpx.post(
@@ -101,7 +105,19 @@ Score da 1 a 10 dove 10 è l'affare perfetto."""
         r.raise_for_status()
         data = r.json()
         text = data["content"][0]["text"].replace("```json", "").replace("```", "").strip()
-        return json.loads(text)
+        result = json.loads(text)
+
+        # Sanity check: margine non può superare 3x il prezzo di acquisto
+        price_num = _extract_price_value(price) or 0
+        if price_num > 0 and result.get("margine_stimato"):
+            max_margine = price_num * 3
+            if result["margine_stimato"] > max_margine:
+                result["margine_stimato"] = round(max_margine * 0.5)
+                result["score"] = min(result.get("score", 5), 5)
+                result["verdict"] = "OK"
+
+        return result
+
     except Exception as e:
         return {
             "score": None,
