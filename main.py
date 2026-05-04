@@ -11,7 +11,8 @@ app = FastAPI(title="Lepefy Backend API")
 # Keyword da monitorare con soglia prezzo massima
 WATCH_LIST = [
     {"keyword": "ThinkPad", "threshold": 300},
-    {"keyword": "Canon EOS", "threshold": 150},
+    {"keyword": "Canon EOS", "threshold": 200},
+    {"keyword": "Nikon D5600", "threshold": 300},
 ]
 
 
