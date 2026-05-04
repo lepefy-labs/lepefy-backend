@@ -181,16 +181,21 @@ def _fetch_subito(keyword: str, max_results: int = 30) -> list[dict]:
     return results
 
 
-def _save_deals(keyword: str, items: list[dict], price_threshold: float) -> dict:
+def _save_deals(
+    keyword: str,
+    items: list[dict],
+    price_threshold: float,
+    min_threshold: float = 0,
+) -> dict:
     """
-    Filtra annunci sotto soglia, li valuta con AI, salva su Supabase
-    e logga il consumo token su ai_usage_log.
-    Ritorna un dict con saved count e riepilogo token AI consumati.
+    Filtra annunci tra min_threshold e price_threshold, li valuta con AI,
+    salva su Supabase e logga il consumo token su ai_usage_log.
     """
     supabase = _get_supabase()
     deals = [
         i for i in items
-        if i.get("price_value") and i["price_value"] <= price_threshold
+        if i.get("price_value")
+        and min_threshold <= i["price_value"] <= price_threshold
     ]
 
     if not deals:
@@ -263,14 +268,19 @@ async def run_lepe_scan(keyword: str, max_results: int = 15) -> list[dict]:
         return [{"title": "Errore Tecnico", "price": str(e), "source": "Subito.it"}]
 
 
-async def run_scan_and_save(keyword: str, price_threshold: float) -> dict:
-    """Cron job: scansiona, valuta con AI, filtra sotto soglia, salva su Supabase."""
+async def run_scan_and_save(
+    keyword: str,
+    price_threshold: float,
+    min_threshold: float = 0,
+) -> dict:
+    """Cron job: scansiona, valuta con AI, filtra tra soglia min e max, salva su Supabase."""
     try:
         items = await asyncio.to_thread(_fetch_subito, keyword, 30)
-        result = await asyncio.to_thread(_save_deals, keyword, items, price_threshold)
+        result = await asyncio.to_thread(_save_deals, keyword, items, price_threshold, min_threshold)
         return {
             "status": "ok",
             "keyword": keyword,
+            "min_threshold": min_threshold,
             "threshold": price_threshold,
             "found": len(items),
             "saved": result["saved"],
