@@ -1,18 +1,15 @@
 import os
-import asyncio
-import requests
-from bs4 import BeautifulSoup
 from fastapi import FastAPI
 from app.scraper.scanner import run_lepe_scan, run_scan_and_save
 from app.scraper.notifier import run_notify_job
 
 app = FastAPI(title="Lepefy Backend API")
 
-# Keyword da monitorare con soglia prezzo massima
+# Keyword da monitorare con soglia prezzo minima e massima
 WATCH_LIST = [
-    {"keyword": "ThinkPad", "threshold": 300},
-    {"keyword": "Canon EOS", "threshold": 200},
-    {"keyword": "Nikon D5600", "threshold": 300},
+    {"keyword": "ThinkPad",  "threshold": 300, "min_threshold": 80},
+    {"keyword": "Canon EOS", "threshold": 400, "min_threshold": 40},
+    {"keyword": "Nikon", "threshold": 300, "min_threshold": 40},
 ]
 
 
@@ -33,13 +30,17 @@ async def test_scan(q: str = "ThinkPad"):
 
 @app.get("/cron/scan")
 async def cron_scan(secret: str = ""):
-    """Scansiona tutte le keyword in WATCH_LIST e salva i deal sotto soglia."""
+    """Scansiona tutte le keyword in WATCH_LIST e salva i deal tra soglia min e max."""
     if secret != os.getenv("CRON_SECRET"):
         return {"error": "unauthorized"}
 
     results = []
     for watch in WATCH_LIST:
-        result = await run_scan_and_save(watch["keyword"], watch["threshold"])
+        result = await run_scan_and_save(
+            watch["keyword"],
+            watch["threshold"],
+            watch.get("min_threshold", 0),
+        )
         results.append(result)
     return {"status": "ok", "results": results}
 
