@@ -15,7 +15,6 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
-# Prezzi Haiku per milione di token (aggiornare se cambiano)
 HAIKU_INPUT_COST_PER_M  = 0.80
 HAIKU_OUTPUT_COST_PER_M = 4.00
 
@@ -25,7 +24,6 @@ def _get_supabase() -> Client:
 
 
 def _extract_price_value(price_str: str) -> float | None:
-    """Estrae il valore numerico da stringhe tipo '275 €' o '1.200 €'."""
     if not price_str or price_str == "N/D":
         return None
     cleaned = re.sub(r"[^\d,.]", "", price_str).replace(".", "").replace(",", ".")
@@ -71,7 +69,7 @@ def _extract_location(ad: dict) -> str:
 def _score_ad(title: str, price: str, location: str, body: str) -> tuple[dict, dict]:
     """
     Chiama Claude Haiku per valutare l'annuncio.
-    Ritorna (risultato_ai, usage) dove usage = {"input_tokens": N, "output_tokens": N}.
+    Ritorna (risultato_ai, usage).
     """
     prompt = f"""Sei un esperto di elettronica usata e flipping su marketplace italiani (Subito.it).
 
@@ -181,70 +179,84 @@ def _fetch_subito(keyword: str, max_results: int = 30) -> list[dict]:
     return results
 
 
-def _save_deals(
-    keyword: str,
-    items: list[dict],
-    price_threshold: float,
-    min_threshold: float = 0,
-) -> dict:
+def _get_active_keywords() -> list[str]:
+    """Legge le keyword attive dalla tabella keywords su Supabase."""
+    supabase = _get_supabase()
+    response = (
+        supabase.table("keywords")
+        .select("keyword")
+        .eq("active", True)
+        .execute()
+    )
+    return [row["keyword"] for row in (response.data or [])]
+
+
+def _scan_keyword(keyword: str) -> dict:
     """
-    Filtra annunci tra min_threshold e price_threshold, li valuta con AI,
-    salva su Supabase e logga il consumo token su ai_usage_log.
+    Scansiona una keyword, valuta con AI ogni annuncio trovato
+    e salva nel pool condiviso scan_results (upsert su url).
+    Il costo AI viene sostenuto UNA VOLTA sola per keyword,
+    indipendentemente da quanti utenti la monitorano.
     """
     supabase = _get_supabase()
-    deals = [
-        i for i in items
-        if i.get("price_value")
-        and min_threshold <= i["price_value"] <= price_threshold
-    ]
+    items = _fetch_subito(keyword, max_results=30)
 
-    if not deals:
-        return {"saved": 0, "tokens": {"input": 0, "output": 0, "cost_usd": 0.0}}
+    if not items:
+        return {"keyword": keyword, "found": 0, "saved": 0,
+                "tokens": {"input": 0, "output": 0, "cost_usd": 0.0}}
 
     total_input = 0
     total_output = 0
     rows = []
 
-    for d in deals:
-        ai, usage = _score_ad(d["title"], d["price"], d["location"], d.get("body", ""))
-        total_input += usage.get("input_tokens", 0)
+    for item in items:
+        if not item.get("price_value"):
+            continue
+
+        ai, usage = _score_ad(
+            item["title"], item["price"], item["location"], item.get("body", "")
+        )
+        total_input  += usage.get("input_tokens", 0)
         total_output += usage.get("output_tokens", 0)
+
         rows.append({
             "keyword": keyword,
-            "title": d["title"],
-            "price_raw": d["price"],
-            "price_value": d["price_value"],
-            "location": d["location"],
-            "url": d["url"],
-            "date_listed": d["date"] or None,
-            "source": d["source"],
-            "notified": False,
+            "title": item["title"],
+            "price_raw": item["price"],
+            "price_value": item["price_value"],
+            "location": item["location"],
+            "url": item["url"],
+            "date_listed": item["date"] or None,
+            "source": item["source"],
             "score": ai.get("score"),
             "margine_stimato": ai.get("margine_stimato"),
             "motivazione": ai.get("motivazione"),
             "rischi": ai.get("rischi"),
         })
 
+    # Upsert su url: non riscrive record già esistenti, non duplica
+    if rows:
+        supabase.table("scan_results").upsert(
+            rows, on_conflict="url", ignore_duplicates=True
+        ).execute()
+
     cost_usd = (
         (total_input  / 1_000_000 * HAIKU_INPUT_COST_PER_M) +
         (total_output / 1_000_000 * HAIKU_OUTPUT_COST_PER_M)
     )
 
-    # Salva gli annunci
-    supabase.table("scan_results").upsert(
-        rows, on_conflict="url", ignore_duplicates=True
-    ).execute()
-
-    # Log consumo AI
+    # Log consumo AI per questa keyword
     supabase.table("ai_usage_log").insert({
         "keyword": keyword,
         "input_tokens": total_input,
         "output_tokens": total_output,
         "cost_usd": round(cost_usd, 5),
-        "deals_scored": len(deals),
+        "deals_scored": len(rows),
     }).execute()
 
     return {
+        "keyword": keyword,
+        "found": len(items),
         "saved": len(rows),
         "tokens": {
             "input": total_input,
@@ -268,23 +280,27 @@ async def run_lepe_scan(keyword: str, max_results: int = 15) -> list[dict]:
         return [{"title": "Errore Tecnico", "price": str(e), "source": "Subito.it"}]
 
 
-async def run_scan_and_save(
-    keyword: str,
-    price_threshold: float,
-    min_threshold: float = 0,
-) -> dict:
-    """Cron job: scansiona, valuta con AI, filtra tra soglia min e max, salva su Supabase."""
+async def run_scan_and_save() -> dict:
+    """
+    Cron job: legge le keyword attive da Supabase, scansiona ciascuna
+    una volta sola e salva nel pool condiviso. Nessuna logica per utente.
+    """
     try:
-        items = await asyncio.to_thread(_fetch_subito, keyword, 30)
-        result = await asyncio.to_thread(_save_deals, keyword, items, price_threshold, min_threshold)
+        keywords = await asyncio.to_thread(_get_active_keywords)
+        if not keywords:
+            return {"status": "ok", "message": "Nessuna keyword attiva"}
+
+        results = []
+        for keyword in keywords:
+            result = await asyncio.to_thread(_scan_keyword, keyword)
+            results.append(result)
+
+        total_cost = sum(r["tokens"]["cost_usd"] for r in results)
         return {
             "status": "ok",
-            "keyword": keyword,
-            "min_threshold": min_threshold,
-            "threshold": price_threshold,
-            "found": len(items),
-            "saved": result["saved"],
-            "ai_usage": result["tokens"],
+            "keywords_scanned": len(keywords),
+            "results": results,
+            "total_cost_usd": round(total_cost, 5),
         }
     except Exception as e:
-        return {"status": "error", "keyword": keyword, "detail": str(e)}
+        return {"status": "error", "detail": str(e)}
