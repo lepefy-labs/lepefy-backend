@@ -41,3 +41,15 @@ async def cron_notify(secret: str = ""):
     if secret != os.getenv("CRON_SECRET"):
         return {"error": "unauthorized"}
     return await run_notify_job()
+
+@app.get("/debug/hades")
+async def debug_hades():
+    import httpx
+    api_key = os.getenv("SCRAPERAPI_KEY")
+    target = "https://www.subito.it/hades/v1/search/items/?q=ThinkPad&lim=3&sort=datedesc"
+    import urllib.parse
+    r = httpx.get(
+        f"http://api.scraperapi.com/?api_key={api_key}&url={urllib.parse.quote(target)}&country_code=it",
+        timeout=30
+    )
+    return {"status": r.status_code, "body": r.text[:1000]}
