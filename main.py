@@ -64,3 +64,27 @@ async def debug_hades():
         timeout=30
     )
     return {"status": r.status_code, "body": r.text[:1000]}
+
+@app.get("/debug/static")
+async def debug_static():
+    import httpx, os
+    from bs4 import BeautifulSoup
+    api_key = os.getenv("SCRAPERAPI_KEY")
+    r = httpx.get(
+        "http://api.scraperapi.com/",
+        params={
+            "api_key": api_key,
+            "url": "https://www.subito.it/annunci-italia/vendita/usato/?q=ThinkPad",
+            "country_code": "it",
+        },
+        timeout=30
+    )
+    soup = BeautifulSoup(r.text, "html.parser")
+    tag = soup.find("script", id="__NEXT_DATA__")
+    if not tag:
+        return {"found": False, "html_preview": r.text[:300]}
+    import json
+    data = json.loads(tag.string)
+    items = data.get("props",{}).get("pageProps",{}).get("initialState",{}).get("items",{})
+    ads = items.get("originalList",[]) if isinstance(items, dict) else []
+    return {"found": True, "ads_count": len(ads), "first": ads[0].get("subject") if ads else None}
