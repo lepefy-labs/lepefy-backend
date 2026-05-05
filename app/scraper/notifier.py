@@ -20,19 +20,9 @@ def _get_supabase() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 
-def _verdict_badge(verdict: str) -> str:
-    color = VERDICT_COLORS.get(verdict, "#9ca3af")
-    return (
-        f'<span style="display:inline-block;padding:2px 8px;border-radius:3px;'
-        f'background:{color};color:#fff;font-size:11px;font-weight:700;">'
-        f'{verdict}</span>'
-    )
-
-
 def _build_email_html(deals: list[dict]) -> str:
     rows = ""
     for d in deals:
-        verdict = d.get("verdict") or "N/D"
         score = d.get("score")
         margine = d.get("margine_stimato")
         motivazione = d.get("motivazione") or ""
@@ -80,7 +70,7 @@ def _build_email_html(deals: list[dict]) -> str:
         </div>
         <div style="padding:24px 32px;">
           <p style="color:#444;font-size:14px;margin:0 0 20px 0;">
-            Abbiamo trovato <strong>{len(deals)} annunci</strong> sotto la tua soglia prezzo:
+            Abbiamo trovato <strong>{len(deals)} annunci</strong> nella tua fascia prezzo:
           </p>
           <table style="width:100%;border-collapse:collapse;">
             <thead>
@@ -111,12 +101,7 @@ def _send_email(to: str, subject: str, html: str) -> None:
             "Authorization": f"Bearer {RESEND_API_KEY}",
             "Content-Type": "application/json",
         },
-        json={
-            "from": EMAIL_FROM,
-            "to": [to],
-            "subject": subject,
-            "html": html,
-        },
+        json={"from": EMAIL_FROM, "to": [to], "subject": subject, "html": html},
         timeout=15,
     )
     response.raise_for_status()
@@ -124,44 +109,96 @@ def _send_email(to: str, subject: str, html: str) -> None:
 
 def _run_notify_job() -> dict:
     """
-    1. Legge da scan_results i deal con notified=false
-    2. Invia email riepilogativa con score, margine e motivazione AI
-    3. Marca i deal come notified=true
+    Per ogni subscription attiva:
+    1. Trova i deal nel pool scan_results che rientrano nella fascia prezzo
+       e che non sono ancora stati notificati a questo utente
+    2. Invia email riepilogativa
+    3. Registra le notifiche inviate in notifications_log
     """
     supabase = _get_supabase()
 
-    response = (
-        supabase.table("scan_results")
+    # Recupera tutte le subscription attive
+    subs_response = (
+        supabase.table("subscriptions")
         .select("*")
-        .eq("notified", False)
-        .order("score", desc=True)   # ordina per score AI decrescente
-        .limit(50)
+        .eq("active", True)
         .execute()
     )
-    deals = response.data or []
+    subscriptions = subs_response.data or []
 
-    if not deals:
-        return {"status": "ok", "message": "Nessun deal da notificare"}
+    if not subscriptions:
+        return {"status": "ok", "message": "Nessuna subscription attiva"}
 
-    notify_email = os.getenv("NOTIFY_EMAIL_OVERRIDE")
-    if not notify_email:
-        return {"status": "error", "message": "NOTIFY_EMAIL_OVERRIDE non impostata"}
+    total_sent = 0
+    results = []
 
-    html = _build_email_html(deals)
-    subject = f"🔍 Lepefy — {len(deals)} nuovi affari trovati"
+    for sub in subscriptions:
+        sub_id = sub["id"]
+        email = sub["email"]
+        keyword = sub["keyword"]
+        min_price = sub.get("min_threshold", 0)
+        max_price = sub["max_threshold"]
 
-    try:
-        _send_email(notify_email, subject, html)
-    except Exception as e:
-        return {"status": "error", "message": f"Invio email fallito: {e}"}
+        # Deal già notificati a questo utente
+        notified_response = (
+            supabase.table("notifications_log")
+            .select("scan_result_id")
+            .eq("subscription_id", sub_id)
+            .execute()
+        )
+        already_notified_ids = {
+            row["scan_result_id"] for row in (notified_response.data or [])
+        }
 
-    ids = [d["id"] for d in deals]
-    supabase.table("scan_results").update({"notified": True}).in_("id", ids).execute()
+        # Deal nel pool che rientrano nella fascia prezzo di questa subscription
+        deals_response = (
+            supabase.table("scan_results")
+            .select("*")
+            .eq("keyword", keyword)
+            .gte("price_value", min_price)
+            .lte("price_value", max_price)
+            .order("score", desc=True)
+            .limit(50)
+            .execute()
+        )
+        all_deals = deals_response.data or []
+
+        # Filtra quelli non ancora notificati a questo utente
+        new_deals = [d for d in all_deals if d["id"] not in already_notified_ids]
+
+        if not new_deals:
+            results.append({"email": email, "keyword": keyword, "sent": 0})
+            continue
+
+        # Invia email
+        html = _build_email_html(new_deals)
+        subject = f"🔍 Lepefy — {len(new_deals)} nuovi affari su {keyword}"
+
+        try:
+            _send_email(email, subject, html)
+        except Exception as e:
+            results.append({"email": email, "keyword": keyword, "error": str(e)})
+            continue
+
+        # Registra le notifiche inviate
+        log_rows = [
+            {"subscription_id": sub_id, "scan_result_id": d["id"]}
+            for d in new_deals
+        ]
+        supabase.table("notifications_log").insert(log_rows).execute()
+
+        total_sent += len(new_deals)
+        results.append({
+            "email": email,
+            "keyword": keyword,
+            "sent": len(new_deals),
+        })
 
     return {
         "status": "ok",
-        "notified_count": len(deals),
-        "sent_to": notify_email,
+        "subscriptions_processed": len(subscriptions),
+        "total_deals_notified": total_sent,
+        "details": results,
     }
 
 
