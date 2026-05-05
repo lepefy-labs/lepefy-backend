@@ -4,6 +4,7 @@ import json
 import asyncio
 import requests
 import httpx
+import time
 from bs4 import BeautifulSoup
 from supabase import create_client, Client
 
@@ -142,10 +143,20 @@ def _fetch_subito(keyword: str, max_results: int = 30) -> list[dict]:
         "url": search_url,
         "render": "true",
         "country_code": "it",
+        "wait": 3000,       # attende 3 secondi dopo il render JS
     }
-    response = requests.get(SCRAPERAPI_URL, params=params, timeout=60)
-    response.raise_for_status()
 
+    # Retry automatico: 3 tentativi con pausa crescente
+    for attempt in range(3):
+        try:
+            response = requests.get(SCRAPERAPI_URL, params=params, timeout=90)
+            response.raise_for_status()
+            break  # successo, esci dal loop
+        except requests.exceptions.HTTPError as e:
+            if attempt == 2:
+                raise  # terzo tentativo fallito, propaga l'errore
+            time.sleep(5 * (attempt + 1))  # attesa 5s, poi 10s
+    
     soup = BeautifulSoup(response.text, "html.parser")
     next_data_tag = soup.find("script", id="__NEXT_DATA__")
     if not next_data_tag:
