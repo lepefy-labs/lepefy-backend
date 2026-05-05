@@ -141,21 +141,19 @@ def _fetch_subito(keyword: str, max_results: int = 30) -> list[dict]:
     params = {
         "api_key": SCRAPERAPI_KEY,
         "url": search_url,
-        "render": "true",
         "country_code": "it",
-        # "wait": 3000,
+        # render=true RIMOSSO — __NEXT_DATA__ presente nell'HTML statico
     }
 
-    # Retry automatico: 3 tentativi con pausa crescente
     for attempt in range(3):
         try:
-            response = requests.get(SCRAPERAPI_URL, params=params, timeout=120)
+            response = requests.get(SCRAPERAPI_URL, params=params, timeout=60)
             response.raise_for_status()
             break
         except requests.exceptions.HTTPError:
             if attempt == 2:
                 raise
-            time.sleep(5 * (attempt + 1))  # 5s poi 10s
+            time.sleep(5 * (attempt + 1))
 
     soup = BeautifulSoup(response.text, "html.parser")
     next_data_tag = soup.find("script", id="__NEXT_DATA__")
@@ -292,8 +290,7 @@ async def run_lepe_scan(keyword: str, max_results: int = 15) -> list[dict]:
 async def run_scan_and_save() -> dict:
     """
     Cron job: legge le keyword attive da Supabase, scansiona ciascuna
-    una volta sola con 10 secondi di pausa tra l'una e l'altra
-    per evitare il throttling di ScraperAPI.
+    una volta sola con 10 secondi di pausa tra l'una e l'altra.
     """
     try:
         keywords = await asyncio.to_thread(_get_active_keywords)
@@ -303,7 +300,7 @@ async def run_scan_and_save() -> dict:
         results = []
         for i, keyword in enumerate(keywords):
             if i > 0:
-                await asyncio.sleep(10)  # pausa anti-throttling tra keyword
+                await asyncio.sleep(10)
             result = await asyncio.to_thread(_scan_keyword, keyword)
             results.append(result)
 
