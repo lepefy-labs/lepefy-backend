@@ -143,7 +143,7 @@ def _fetch_subito(keyword: str, max_results: int = 30) -> list[dict]:
         "url": search_url,
         "render": "true",
         "country_code": "it",
-        "wait": 3000,
+        # "wait": 3000,
     }
 
     # Retry automatico: 3 tentativi con pausa crescente
