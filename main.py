@@ -44,12 +44,23 @@ async def cron_notify(secret: str = ""):
 
 @app.get("/debug/hades")
 async def debug_hades():
-    import httpx
+    import httpx, urllib.parse, os
     api_key = os.getenv("SCRAPERAPI_KEY")
     target = "https://www.subito.it/hades/v1/search/items/?q=ThinkPad&lim=3&sort=datedesc"
-    import urllib.parse
     r = httpx.get(
-        f"http://api.scraperapi.com/?api_key={api_key}&url={urllib.parse.quote(target)}&country_code=it",
+        f"http://api.scraperapi.com/",
+        params={
+            "api_key": api_key,
+            "url": target,
+            "country_code": "it",
+            "keep_headers": "true",
+        },
+        headers={
+            "Origin": "https://www.subito.it",
+            "Referer": "https://www.subito.it/annunci-italia/vendita/usato/?q=ThinkPad",
+            "Accept": "application/json",
+            "x-source": "subito-ui",
+        },
         timeout=30
     )
     return {"status": r.status_code, "body": r.text[:1000]}
