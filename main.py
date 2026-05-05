@@ -5,13 +5,6 @@ from app.scraper.notifier import run_notify_job
 
 app = FastAPI(title="Lepefy Backend API")
 
-# Keyword da monitorare con soglia prezzo minima e massima
-WATCH_LIST = [
-    {"keyword": "ThinkPad",  "threshold": 300, "min_threshold": 80},
-    {"keyword": "Canon EOS", "threshold": 400, "min_threshold": 40},
-    {"keyword": "Nikon", "threshold": 300, "min_threshold": 40},
-]
-
 
 @app.get("/")
 def read_root():
@@ -30,24 +23,21 @@ async def test_scan(q: str = "ThinkPad"):
 
 @app.get("/cron/scan")
 async def cron_scan(secret: str = ""):
-    """Scansiona tutte le keyword in WATCH_LIST e salva i deal tra soglia min e max."""
+    """
+    Legge le keyword attive da Supabase, scansiona ciascuna una volta sola
+    e salva i deal nel pool condiviso scan_results.
+    """
     if secret != os.getenv("CRON_SECRET"):
         return {"error": "unauthorized"}
-
-    results = []
-    for watch in WATCH_LIST:
-        result = await run_scan_and_save(
-            watch["keyword"],
-            watch["threshold"],
-            watch.get("min_threshold", 0),
-        )
-        results.append(result)
-    return {"status": "ok", "results": results}
+    return await run_scan_and_save()
 
 
 @app.get("/cron/notify")
 async def cron_notify(secret: str = ""):
-    """Invia email con i deal non ancora notificati agli utenti Premium."""
+    """
+    Per ogni subscription attiva, invia i deal non ancora notificati
+    che rientrano nella fascia prezzo dell'utente.
+    """
     if secret != os.getenv("CRON_SECRET"):
         return {"error": "unauthorized"}
     return await run_notify_job()
