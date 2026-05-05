@@ -1,10 +1,10 @@
 import os
 import re
 import json
+import time
 import asyncio
 import requests
 import httpx
-import time
 from bs4 import BeautifulSoup
 from supabase import create_client, Client
 
@@ -143,20 +143,20 @@ def _fetch_subito(keyword: str, max_results: int = 30) -> list[dict]:
         "url": search_url,
         "render": "true",
         "country_code": "it",
-        "wait": 3000,       # attende 3 secondi dopo il render JS
+        "wait": 3000,
     }
 
     # Retry automatico: 3 tentativi con pausa crescente
     for attempt in range(3):
         try:
-            response = requests.get(SCRAPERAPI_URL, params=params, timeout=90)
+            response = requests.get(SCRAPERAPI_URL, params=params, timeout=120)
             response.raise_for_status()
-            break  # successo, esci dal loop
-        except requests.exceptions.HTTPError as e:
+            break
+        except requests.exceptions.HTTPError:
             if attempt == 2:
-                raise  # terzo tentativo fallito, propaga l'errore
-            time.sleep(5 * (attempt + 1))  # attesa 5s, poi 10s
-    
+                raise
+            time.sleep(5 * (attempt + 1))  # 5s poi 10s
+
     soup = BeautifulSoup(response.text, "html.parser")
     next_data_tag = soup.find("script", id="__NEXT_DATA__")
     if not next_data_tag:
@@ -245,7 +245,6 @@ def _scan_keyword(keyword: str) -> dict:
             "rischi": ai.get("rischi"),
         })
 
-    # Upsert su url: non riscrive record già esistenti, non duplica
     if rows:
         supabase.table("scan_results").upsert(
             rows, on_conflict="url", ignore_duplicates=True
@@ -256,7 +255,6 @@ def _scan_keyword(keyword: str) -> dict:
         (total_output / 1_000_000 * HAIKU_OUTPUT_COST_PER_M)
     )
 
-    # Log consumo AI per questa keyword
     supabase.table("ai_usage_log").insert({
         "keyword": keyword,
         "input_tokens": total_input,
@@ -294,7 +292,8 @@ async def run_lepe_scan(keyword: str, max_results: int = 15) -> list[dict]:
 async def run_scan_and_save() -> dict:
     """
     Cron job: legge le keyword attive da Supabase, scansiona ciascuna
-    una volta sola e salva nel pool condiviso. Nessuna logica per utente.
+    una volta sola con 10 secondi di pausa tra l'una e l'altra
+    per evitare il throttling di ScraperAPI.
     """
     try:
         keywords = await asyncio.to_thread(_get_active_keywords)
@@ -302,7 +301,9 @@ async def run_scan_and_save() -> dict:
             return {"status": "ok", "message": "Nessuna keyword attiva"}
 
         results = []
-        for keyword in keywords:
+        for i, keyword in enumerate(keywords):
+            if i > 0:
+                await asyncio.sleep(10)  # pausa anti-throttling tra keyword
             result = await asyncio.to_thread(_scan_keyword, keyword)
             results.append(result)
 
