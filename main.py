@@ -67,8 +67,7 @@ async def debug_hades():
 
 @app.get("/debug/static")
 async def debug_static():
-    import httpx, os
-    from bs4 import BeautifulSoup
+    import httpx, os, json
     api_key = os.getenv("SCRAPERAPI_KEY")
     r = httpx.get(
         "http://api.scraperapi.com/",
@@ -79,12 +78,17 @@ async def debug_static():
         },
         timeout=30
     )
-    soup = BeautifulSoup(r.text, "html.parser")
-    tag = soup.find("script", id="__NEXT_DATA__")
-    if not tag:
-        return {"found": False, "html_preview": r.text[:300]}
-    import json
-    data = json.loads(tag.string)
-    items = data.get("props",{}).get("pageProps",{}).get("initialState",{}).get("items",{})
-    ads = items.get("originalList",[]) if isinstance(items, dict) else []
-    return {"found": True, "ads_count": len(ads), "first": ads[0].get("subject") if ads else None}
+    # Cerca __NEXT_DATA__ con stringa semplice
+    html = r.text
+    marker = '__NEXT_DATA__'
+    found = marker in html
+    preview = ""
+    if found:
+        start = html.find(marker)
+        preview = html[start:start+200]
+    return {
+        "http_status": r.status_code,
+        "next_data_found": found,
+        "preview": preview,
+        "html_length": len(html),
+    }
