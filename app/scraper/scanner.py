@@ -44,6 +44,18 @@ def _extract_price(ad: dict) -> str:
     return "N/D"
 
 
+def _extract_shipping(ad: dict) -> str:
+    """Estrae la spedizione dichiarata dal venditore nelle features."""
+    features = ad.get("features", {})
+    if isinstance(features, dict):
+        shipping_feature = features.get("/shipping")
+        if shipping_feature:
+            vals = shipping_feature.get("values", [])
+            if vals and isinstance(vals[0], dict):
+                return vals[0].get("value", "non specificata")
+    return "non specificata"
+
+
 def _extract_url(ad: dict) -> str:
     urls = ad.get("urls", {})
     if isinstance(urls, dict) and urls:
@@ -67,12 +79,18 @@ def _extract_location(ad: dict) -> str:
     return f"{city_val}, {region_val}".strip(", ")
 
 
-def _score_ad(title: str, price: str, location: str, body: str, keyword: str) -> tuple[dict, dict]:
+def _score_ad(title: str, price: str, location: str, body: str, keyword: str, shipping: str) -> tuple[dict, dict]:
     """
     Chiama Claude Haiku per valutare l'annuncio.
-    Verifica pertinenza alla keyword e calcola margine reale.
+    Verifica pertinenza alla keyword e calcola margine lordo reale.
     Ritorna (risultato_ai, usage).
     """
+    shipping_info = (
+        f"Spedizione dichiarata dal venditore: {shipping}"
+        if shipping and shipping != "non specificata"
+        else "Spedizione non specificata dal venditore — stima ~€6"
+    )
+
     prompt = f"""Sei un esperto di elettronica usata e flipping su marketplace italiani (Subito.it).
 
 Keyword cercata: "{keyword}"
@@ -81,6 +99,7 @@ Annuncio:
 Titolo: {title}
 Prezzo richiesto: {price}
 Città: {location}
+{shipping_info}
 Descrizione: {body[:800] if body else 'N/D'}
 
 REGOLA FONDAMENTALE: se l'articolo principale dell'annuncio NON corrisponde alla keyword cercata
@@ -88,9 +107,13 @@ REGOLA FONDAMENTALE: se l'articolo principale dell'annuncio NON corrisponde alla
 riferimento secondario), assegna score 1 e verdict EVITA con motivazione "Annuncio non pertinente".
 
 Se l'annuncio è pertinente, stima il valore di rivendita REALE su Subito.it/eBay Italia per
-questo articolo USATO. Sii conservativo: considera spese di spedizione (~6€), commissioni
-piattaforma (~10%) e tempo. Il margine_stimato è: valore_rivendita - prezzo_acquisto - spese_totali.
-Se il margine netto è sotto €15, metti score massimo 4.
+questo articolo USATO.
+
+Calcolo margine lordo:
+- margine_stimato = valore_rivendita_stimato - prezzo_acquisto - costo_spedizione
+- Usa la spedizione dichiarata sopra. Se non specificata, usa €6 come stima prudente.
+- NON applicare commissioni di piattaforma: sarà il venditore a valutarle in base al canale scelto.
+- Se il margine lordo è sotto €15, metti score massimo 4.
 
 Rispondi SOLO con JSON valido, nessun testo extra:
 {{"score":7,"verdict":"AFFARE","valore_stimato":320,"margine_stimato":70,"motivazione":"max 15 parole","rischi":"max 10 parole"}}
@@ -189,6 +212,7 @@ def _fetch_subito(keyword: str, max_results: int = 30) -> list[dict]:
             "date": ad.get("date", ""),
             "url": _extract_url(ad),
             "body": ad.get("body", ""),
+            "shipping": _extract_shipping(ad),
             "source": "Subito.it",
         })
     return results
@@ -211,6 +235,7 @@ def _scan_keyword(keyword: str) -> dict:
     - Claude chiamato SOLO per annunci nuovi o con prezzo cambiato
     - Annunci non pertinenti o con margine <= 0 vengono scartati
     - Annunci con prezzo cambiato vengono rivalutati e aggiornati in DB
+    - Spedizione reale estratta dall'annuncio e passata al prompt AI
     """
     supabase = _get_supabase()
     items = _fetch_subito(keyword, max_results=30)
@@ -244,18 +269,16 @@ def _scan_keyword(keyword: str) -> dict:
         price_value = item["price_value"]
 
         if url in existing:
-            # Annuncio già in DB — salta se il prezzo non è cambiato
             if existing[url] == price_value:
                 skipped += 1
                 continue
-            # Prezzo cambiato — rivaluta con AI
             price_changed = True
         else:
             price_changed = False
 
         ai, usage = _score_ad(
             item["title"], item["price"], item["location"],
-            item.get("body", ""), keyword
+            item.get("body", ""), keyword, item.get("shipping", "non specificata")
         )
         total_input  += usage.get("input_tokens", 0)
         total_output += usage.get("output_tokens", 0)
@@ -271,24 +294,16 @@ def _scan_keyword(keyword: str) -> dict:
             continue
 
         if price_changed:
-            # Aggiorna prezzo e score nel record esistente
-            # Resetta notifications_log per questo annuncio
-            # così gli utenti vengono rinotificati con il nuovo prezzo
-            result = (
-                supabase.table("scan_results")
-                .update({
-                    "price_raw": item["price"],
-                    "price_value": price_value,
-                    "score": ai.get("score"),
-                    "margine_stimato": margine,
-                    "motivazione": ai.get("motivazione"),
-                    "rischi": ai.get("rischi"),
-                })
-                .eq("url", url)
-                .execute()
-            )
-            # Cancella le notifiche precedenti per questo annuncio
-            # così il prezzo aggiornato viene rinotificato agli utenti
+            supabase.table("scan_results").update({
+                "price_raw": item["price"],
+                "price_value": price_value,
+                "score": ai.get("score"),
+                "margine_stimato": margine,
+                "motivazione": ai.get("motivazione"),
+                "rischi": ai.get("rischi"),
+            }).eq("url", url).execute()
+
+            # Resetta notifications_log per rinotificare con il nuovo prezzo
             scan_ids = (
                 supabase.table("scan_results")
                 .select("id")
