@@ -5,15 +5,9 @@ from supabase import create_client, Client
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
-RESEND_API_KEY = os.getenv("RESEND_API_KEY")
-EMAIL_FROM = os.getenv("EMAIL_FROM", "onboarding@resend.dev")
-
-VERDICT_COLORS = {
-    "AFFARE": "#16a34a",
-    "OK":     "#d97706",
-    "EVITA":  "#dc2626",
-    "N/D":    "#9ca3af",
-}
+BREVO_API_KEY = os.getenv("BREVO_API_KEY")
+EMAIL_FROM = os.getenv("EMAIL_FROM", "noreply@tuodominio.it")
+EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "Lepefy")
 
 
 def _get_supabase() -> Client:
@@ -96,12 +90,17 @@ def _build_email_html(deals: list[dict]) -> str:
 
 def _send_email(to: str, subject: str, html: str) -> None:
     response = httpx.post(
-        "https://api.resend.com/emails",
+        "https://api.brevo.com/v3/smtp/email",
         headers={
-            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "api-key": BREVO_API_KEY,
             "Content-Type": "application/json",
         },
-        json={"from": EMAIL_FROM, "to": [to], "subject": subject, "html": html},
+        json={
+            "sender": {"name": EMAIL_FROM_NAME, "email": EMAIL_FROM},
+            "to": [{"email": to}],
+            "subject": subject,
+            "htmlContent": html,
+        },
         timeout=15,
     )
     response.raise_for_status()
@@ -112,12 +111,11 @@ def _run_notify_job() -> dict:
     Per ogni subscription attiva:
     1. Trova i deal nel pool scan_results che rientrano nella fascia prezzo
        e che non sono ancora stati notificati a questo utente
-    2. Invia email riepilogativa
+    2. Invia email riepilogativa via Brevo
     3. Registra le notifiche inviate in notifications_log
     """
     supabase = _get_supabase()
 
-    # Recupera tutte le subscription attive
     subs_response = (
         supabase.table("subscriptions")
         .select("*")
@@ -150,7 +148,7 @@ def _run_notify_job() -> dict:
             row["scan_result_id"] for row in (notified_response.data or [])
         }
 
-        # Deal nel pool che rientrano nella fascia prezzo di questa subscription
+        # Deal nel pool che rientrano nella fascia prezzo
         deals_response = (
             supabase.table("scan_results")
             .select("*")
@@ -170,7 +168,6 @@ def _run_notify_job() -> dict:
             results.append({"email": email, "keyword": keyword, "sent": 0})
             continue
 
-        # Invia email
         html = _build_email_html(new_deals)
         subject = f"🔍 Lepefy — {len(new_deals)} nuovi affari su {keyword}"
 
