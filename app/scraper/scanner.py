@@ -67,12 +67,15 @@ def _extract_location(ad: dict) -> str:
     return f"{city_val}, {region_val}".strip(", ")
 
 
-def _score_ad(title: str, price: str, location: str, body: str) -> tuple[dict, dict]:
+def _score_ad(title: str, price: str, location: str, body: str, keyword: str) -> tuple[dict, dict]:
     """
     Chiama Claude Haiku per valutare l'annuncio.
+    Verifica pertinenza alla keyword e calcola margine reale.
     Ritorna (risultato_ai, usage).
     """
     prompt = f"""Sei un esperto di elettronica usata e flipping su marketplace italiani (Subito.it).
+
+Keyword cercata: "{keyword}"
 
 Annuncio:
 Titolo: {title}
@@ -80,15 +83,19 @@ Prezzo richiesto: {price}
 Città: {location}
 Descrizione: {body[:800] if body else 'N/D'}
 
-Stima il valore di rivendita REALE su Subito.it/eBay Italia per questo articolo USATO.
-Sii conservativo: considera spese di spedizione (~6€), commissioni piattaforma (~10%) e tempo.
-Il margine_stimato è: valore_rivendita - prezzo_acquisto - spese_totali.
-Se il margine netto è sotto €15, metti score massimo 4 indipendentemente dal prodotto.
+REGOLA FONDAMENTALE: se l'articolo principale dell'annuncio NON corrisponde alla keyword cercata
+(es. viene citato solo come accessorio compatibile, nella lista modelli supportati, o come
+riferimento secondario), assegna score 1 e verdict EVITA con motivazione "Annuncio non pertinente".
+
+Se l'annuncio è pertinente, stima il valore di rivendita REALE su Subito.it/eBay Italia per
+questo articolo USATO. Sii conservativo: considera spese di spedizione (~6€), commissioni
+piattaforma (~10%) e tempo. Il margine_stimato è: valore_rivendita - prezzo_acquisto - spese_totali.
+Se il margine netto è sotto €15, metti score massimo 4.
 
 Rispondi SOLO con JSON valido, nessun testo extra:
 {{"score":7,"verdict":"AFFARE","valore_stimato":320,"margine_stimato":70,"motivazione":"max 15 parole","rischi":"max 10 parole"}}
 
-Valori possibili per verdict: AFFARE (margine>40€), OK (margine 15-40€), EVITA (margine<15€ o rischio alto)"""
+Valori possibili per verdict: AFFARE (margine>40€), OK (margine 15-40€), EVITA (margine<15€ o non pertinente)"""
 
     try:
         r = httpx.post(
@@ -142,7 +149,6 @@ def _fetch_subito(keyword: str, max_results: int = 30) -> list[dict]:
         "api_key": SCRAPERAPI_KEY,
         "url": search_url,
         "country_code": "it",
-        # render=true RIMOSSO — __NEXT_DATA__ presente nell'HTML statico
     }
 
     for attempt in range(3):
@@ -189,7 +195,6 @@ def _fetch_subito(keyword: str, max_results: int = 30) -> list[dict]:
 
 
 def _get_active_keywords() -> list[str]:
-    """Legge le keyword attive dalla tabella keywords su Supabase."""
     supabase = _get_supabase()
     response = (
         supabase.table("keywords")
@@ -203,63 +208,116 @@ def _get_active_keywords() -> list[str]:
 def _scan_keyword(keyword: str) -> dict:
     """
     Scansiona una keyword e salva nel pool condiviso scan_results.
-    Claude viene chiamato SOLO per gli annunci non ancora presenti in DB,
-    eliminando sprechi di token su annunci già valutati.
+    - Claude chiamato SOLO per annunci nuovi o con prezzo cambiato
+    - Annunci non pertinenti o con margine <= 0 vengono scartati
+    - Annunci con prezzo cambiato vengono rivalutati e aggiornati in DB
     """
     supabase = _get_supabase()
     items = _fetch_subito(keyword, max_results=30)
 
     if not items:
-        return {"keyword": keyword, "found": 0, "new": 0, "skipped": 0,
+        return {"keyword": keyword, "found": 0, "new": 0, "updated": 0,
+                "skipped": 0, "rejected": 0,
                 "tokens": {"input": 0, "output": 0, "cost_usd": 0.0}}
 
-    # Recupera URL già presenti in DB per questa keyword
+    # Recupera URL e prezzi già presenti in DB per questa keyword
     existing_response = (
         supabase.table("scan_results")
-        .select("url")
+        .select("url, price_value")
         .eq("keyword", keyword)
         .execute()
     )
-    existing_urls = {row["url"] for row in (existing_response.data or [])}
+    existing = {row["url"]: row["price_value"] for row in (existing_response.data or [])}
 
     total_input = 0
     total_output = 0
-    rows = []
+    new_rows = []
     skipped = 0
+    rejected = 0
+    updated = 0
 
     for item in items:
         if not item.get("price_value"):
             continue
 
-        # Salta annunci già presenti — nessuna chiamata Claude
-        if item["url"] in existing_urls:
-            skipped += 1
-            continue
+        url = item["url"]
+        price_value = item["price_value"]
+
+        if url in existing:
+            # Annuncio già in DB — salta se il prezzo non è cambiato
+            if existing[url] == price_value:
+                skipped += 1
+                continue
+            # Prezzo cambiato — rivaluta con AI
+            price_changed = True
+        else:
+            price_changed = False
 
         ai, usage = _score_ad(
-            item["title"], item["price"], item["location"], item.get("body", "")
+            item["title"], item["price"], item["location"],
+            item.get("body", ""), keyword
         )
         total_input  += usage.get("input_tokens", 0)
         total_output += usage.get("output_tokens", 0)
 
-        rows.append({
-            "keyword": keyword,
-            "title": item["title"],
-            "price_raw": item["price"],
-            "price_value": item["price_value"],
-            "location": item["location"],
-            "url": item["url"],
-            "date_listed": item["date"] or None,
-            "source": item["source"],
-            "score": ai.get("score"),
-            "margine_stimato": ai.get("margine_stimato"),
-            "motivazione": ai.get("motivazione"),
-            "rischi": ai.get("rischi"),
-        })
+        margine = ai.get("margine_stimato")
 
-    if rows:
+        # Scarta annunci non pertinenti o con margine negativo/nullo
+        if ai.get("verdict") == "EVITA" and ai.get("score") == 1:
+            rejected += 1
+            continue
+        if margine is not None and margine <= 0:
+            rejected += 1
+            continue
+
+        if price_changed:
+            # Aggiorna prezzo e score nel record esistente
+            # Resetta notifications_log per questo annuncio
+            # così gli utenti vengono rinotificati con il nuovo prezzo
+            result = (
+                supabase.table("scan_results")
+                .update({
+                    "price_raw": item["price"],
+                    "price_value": price_value,
+                    "score": ai.get("score"),
+                    "margine_stimato": margine,
+                    "motivazione": ai.get("motivazione"),
+                    "rischi": ai.get("rischi"),
+                })
+                .eq("url", url)
+                .execute()
+            )
+            # Cancella le notifiche precedenti per questo annuncio
+            # così il prezzo aggiornato viene rinotificato agli utenti
+            scan_ids = (
+                supabase.table("scan_results")
+                .select("id")
+                .eq("url", url)
+                .execute()
+            )
+            if scan_ids.data:
+                scan_id = scan_ids.data[0]["id"]
+                supabase.table("notifications_log").delete().eq("scan_result_id", scan_id).execute()
+            updated += 1
+        else:
+            new_rows.append({
+                "keyword": keyword,
+                "title": item["title"],
+                "price_raw": item["price"],
+                "price_value": price_value,
+                "location": item["location"],
+                "url": url,
+                "date_listed": item["date"] or None,
+                "source": item["source"],
+                "score": ai.get("score"),
+                "margine_stimato": margine,
+                "motivazione": ai.get("motivazione"),
+                "rischi": ai.get("rischi"),
+            })
+
+    if new_rows:
         supabase.table("scan_results").upsert(
-            rows, on_conflict="url", ignore_duplicates=True
+            new_rows, on_conflict="url", ignore_duplicates=True
         ).execute()
 
     cost_usd = (
@@ -273,14 +331,16 @@ def _scan_keyword(keyword: str) -> dict:
             "input_tokens": total_input,
             "output_tokens": total_output,
             "cost_usd": round(cost_usd, 5),
-            "deals_scored": len(rows),
+            "deals_scored": len(new_rows) + updated + rejected,
         }).execute()
 
     return {
         "keyword": keyword,
         "found": len(items),
-        "new": len(rows),
+        "new": len(new_rows),
+        "updated": updated,
         "skipped": skipped,
+        "rejected": rejected,
         "tokens": {
             "input": total_input,
             "output": total_output,
