@@ -164,6 +164,13 @@ def _run_notify_job() -> dict:
         # Filtra quelli non ancora notificati a questo utente
         new_deals = [d for d in all_deals if d["id"] not in already_notified_ids]
 
+        # Ordina per valore atteso: score x margine
+        # Un affare con score 8 e margine 150 (1200) batte score 8 e margine 20 (160)
+        new_deals.sort(
+            key=lambda d: (d.get("score") or 0) * (d.get("margine_stimato") or 0),
+            reverse=True
+        )
+
         if not new_deals:
             results.append({"email": email, "keyword": keyword, "sent": 0})
             continue
