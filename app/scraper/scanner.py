@@ -202,24 +202,38 @@ def _get_active_keywords() -> list[str]:
 
 def _scan_keyword(keyword: str) -> dict:
     """
-    Scansiona una keyword, valuta con AI ogni annuncio trovato
-    e salva nel pool condiviso scan_results (upsert su url).
-    Il costo AI viene sostenuto UNA VOLTA sola per keyword,
-    indipendentemente da quanti utenti la monitorano.
+    Scansiona una keyword e salva nel pool condiviso scan_results.
+    Claude viene chiamato SOLO per gli annunci non ancora presenti in DB,
+    eliminando sprechi di token su annunci già valutati.
     """
     supabase = _get_supabase()
     items = _fetch_subito(keyword, max_results=30)
 
     if not items:
-        return {"keyword": keyword, "found": 0, "saved": 0,
+        return {"keyword": keyword, "found": 0, "new": 0, "skipped": 0,
                 "tokens": {"input": 0, "output": 0, "cost_usd": 0.0}}
+
+    # Recupera URL già presenti in DB per questa keyword
+    existing_response = (
+        supabase.table("scan_results")
+        .select("url")
+        .eq("keyword", keyword)
+        .execute()
+    )
+    existing_urls = {row["url"] for row in (existing_response.data or [])}
 
     total_input = 0
     total_output = 0
     rows = []
+    skipped = 0
 
     for item in items:
         if not item.get("price_value"):
+            continue
+
+        # Salta annunci già presenti — nessuna chiamata Claude
+        if item["url"] in existing_urls:
+            skipped += 1
             continue
 
         ai, usage = _score_ad(
@@ -253,18 +267,20 @@ def _scan_keyword(keyword: str) -> dict:
         (total_output / 1_000_000 * HAIKU_OUTPUT_COST_PER_M)
     )
 
-    supabase.table("ai_usage_log").insert({
-        "keyword": keyword,
-        "input_tokens": total_input,
-        "output_tokens": total_output,
-        "cost_usd": round(cost_usd, 5),
-        "deals_scored": len(rows),
-    }).execute()
+    if total_input > 0:
+        supabase.table("ai_usage_log").insert({
+            "keyword": keyword,
+            "input_tokens": total_input,
+            "output_tokens": total_output,
+            "cost_usd": round(cost_usd, 5),
+            "deals_scored": len(rows),
+        }).execute()
 
     return {
         "keyword": keyword,
         "found": len(items),
-        "saved": len(rows),
+        "new": len(rows),
+        "skipped": skipped,
         "tokens": {
             "input": total_input,
             "output": total_output,
