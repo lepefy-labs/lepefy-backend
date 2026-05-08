@@ -276,6 +276,15 @@ def _scan_keyword(keyword: str) -> dict:
         else:
             price_changed = False
 
+        # Pre-filtro leggero: la keyword deve apparire nel titolo
+        # o nei primi 200 caratteri del body — senza chiamare Claude
+        keyword_lower = keyword.lower()
+        title_lower = item["title"].lower()
+        body_preview = item.get("body", "")[:200].lower()
+        if keyword_lower not in title_lower and keyword_lower not in body_preview:
+            rejected += 1
+            continue
+
         ai, usage = _score_ad(
             item["title"], item["price"], item["location"],
             item.get("body", ""), keyword, item.get("shipping", "non specificata")
