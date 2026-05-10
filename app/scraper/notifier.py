@@ -59,8 +59,8 @@ def _build_email_html(deals: list[dict]) -> str:
     <body style="margin:0;padding:0;background:#f9f9f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
       <div style="max-width:640px;margin:40px auto;background:#fff;border-radius:8px;overflow:hidden;border:1px solid #e8e8e8;">
         <div style="background:#1a1a1a;padding:24px 32px;">
-          <span style="color:#facc15;font-size:20px;font-weight:700;letter-spacing:1px;">Lepefy</span>
-          <span style="color:#666;font-size:13px;margin-left:12px;">nuovi affari trovati</span>
+          <img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNjggNDgiIHdpZHRoPSIxNjgiIGhlaWdodD0iNDgiIHJvbGU9ImltZyI+CiAgPHRpdGxlPkxlcGVmeTwvdGl0bGU+CiAgPGRlc2M+TGVwZWZ5IGxvZ28gb3JpenpvbnRhbGUgcGVyIHNmb25kaSBzY3VyaTwvZGVzYz4KICA8cGF0aCBkPSJNIDQgNCBMIDQgNDQgTCAzNiA0NCIgc3Ryb2tlPSIjRTBFN0ZGIiBzdHJva2Utd2lkdGg9IjUiIGZpbGw9Im5vbmUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPgogIDxwYXRoIGQ9Ik0gNCAzNCBBIDEwIDEwIDAgMCAxIDE0IDQ0IiBzdHJva2U9IiM4MThDRjgiIHN0cm9rZS13aWR0aD0iMS41IiBmaWxsPSJub25lIi8+CiAgPHBhdGggZD0iTSA0IDI0IEEgMjAgMjAgMCAwIDEgMjQgNDQiIHN0cm9rZT0iIzgxOENGOCIgc3Ryb2tlLXdpZHRoPSIxLjUiIGZpbGw9Im5vbmUiIG9wYWNpdHk9IjAuNTUiLz4KICA8cGF0aCBkPSJNIDQgMTQgQSAzMCAzMCAwIDAgMSAzNCA0NCIgc3Ryb2tlPSIjODE4Q0Y4IiBzdHJva2Utd2lkdGg9IjEuNSIgZmlsbD0ibm9uZSIgb3BhY2l0eT0iMC4yNSIvPgogIDx0ZXh0IHg9IjUwIiB5PSIzNSIgZm9udC1mYW1pbHk9Ii1hcHBsZS1zeXN0ZW0sIEJsaW5rTWFjU3lzdGVtRm9udCwgJ0hlbHZldGljYSBOZXVlJywgQXJpYWwsIHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMjgiIGZvbnQtd2VpZ2h0PSI4MDAiIGZpbGw9IiNFMEU3RkYiIGxldHRlci1zcGFjaW5nPSItMSI+bGVwZWZ5PC90ZXh0Pgo8L3N2Zz4K" alt="Lepefy" height="40" style="display:block;" />
+          <span style="color:#666;font-size:13px;margin-top:8px;display:block;">nuovi affari trovati</span>
         </div>
         <div style="padding:24px 32px;">
           <p style="color:#444;font-size:14px;margin:0 0 20px 0;">
