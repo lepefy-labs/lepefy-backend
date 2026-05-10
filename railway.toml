@@ -1,6 +1,6 @@
 [[services]]
 name = "scanner-cron"
-cronSchedule = "0 20 * * *"
+cronSchedule = "05 20 * * *"
 startCommand = "curl -s https://lepefy-backend-production.up.railway.app/cron/scan?secret=lepefy_fona_2488"
 
 [[services]]
