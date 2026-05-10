@@ -58,7 +58,7 @@ def _fetch_via_scraperapi(url: str) -> requests.Response:
     params = {
         "api_key": SCRAPERAPI_KEY,
         "url": url,
-        "country_code": "it",
+        # country_code rimosso: non incluso nel piano attuale
     }
     for attempt in range(3):
         try:
