@@ -322,7 +322,7 @@ def _get_active_keywords() -> list[str]:
         .eq("active", True)
         .execute()
     )
-    return [row["keyword"] for row in (response.data or [])]
+    return [row["keyword"].lower() for row in (response.data or [])]
 
 
 def _scan_keyword(keyword: str) -> dict:
@@ -365,7 +365,7 @@ def _scan_keyword(keyword: str) -> dict:
             price_changed = False
 
         # Pre-filtro: keyword deve apparire nel titolo o nei primi 200 char del body
-        keyword_lower = keyword.lower()
+        keyword_lower = keyword  # gia lowercase dalla normalizzazione
         if (keyword_lower not in item["title"].lower() and
                 keyword_lower not in item.get("body", "")[:200].lower()):
             rejected += 1
