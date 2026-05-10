@@ -7,4 +7,4 @@ startCommand = "curl -s https://lepefy-backend-production.up.railway.app/cron/sc
 name = "market-scanner-cron"
 [services.deploy]
 startCommand = "curl -s 'https://tuo-dominio.up.railway.app/cron/market-scan?secret=lepefy_fona_2488'"
-cronSchedule = "35 20 * * *"
+cronSchedule = "50 18 * * *"
