@@ -295,7 +295,7 @@ def _fetch_subito_market(keyword: str, max_results: int = 100) -> list[dict]:
         params = {
             "api_key":      SCRAPERAPI_KEY,
             "url":          search_url,
-            "country_code": "it",
+           # "country_code": "it",
         }
 
         try:
