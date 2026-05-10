@@ -133,7 +133,7 @@ def _run_notify_job() -> dict:
     for sub in subscriptions:
         sub_id = sub["id"]
         email = sub["email"]
-        keyword = sub["keyword"]
+        keyword = sub["keyword"].lower()
         min_price = sub.get("min_threshold", 0)
         max_price = sub["max_threshold"]
 
@@ -152,7 +152,7 @@ def _run_notify_job() -> dict:
         deals_response = (
             supabase.table("scan_results")
             .select("*")
-            .eq("keyword", keyword)
+            .ilike("keyword", keyword)
             .gte("price_value", min_price)
             .lte("price_value", max_price)
             .order("score", desc=True)
