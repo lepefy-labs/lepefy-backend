@@ -106,14 +106,26 @@ REGOLA FONDAMENTALE: se l'articolo principale dell'annuncio NON corrisponde alla
 (es. viene citato solo come accessorio compatibile, nella lista modelli supportati, o come
 riferimento secondario), assegna score 1 e verdict EVITA con motivazione "Annuncio non pertinente".
 
-Se l'annuncio è pertinente, stima il valore di rivendita REALE su Subito.it/eBay Italia per
-questo articolo USATO.
+Se l'annuncio è pertinente, stima il valore di rivendita REALE su Subito.it/eBay Italia.
+
+Analizza ogni componente elencato separatamente:
+- Corpo macchina: stima il valore usato reale sul mercato italiano
+- Ogni obiettivo: stima il valore usato reale separatamente
+- Accessori minori (borse, filtri, batterie extra, schede SD, tracolla):
+  valgono poco usati (€5-20 cadauno), NON gonfiare il totale per la loro presenza
+
+Regole importanti:
+- Il valore totale di un kit e SEMPRE inferiore alla somma dei singoli pezzi
+  perché trovare un acquirente per un kit completo e piu difficile
+- Sii conservativo: meglio sottostimare che sovrastimare
+- Il valore di rivendita non puo essere superiore al 40% in piu del prezzo richiesto
+  per articoli comuni (corpi reflex, obiettivi standard)
 
 Calcolo margine lordo:
 - margine_stimato = valore_rivendita_stimato - prezzo_acquisto - costo_spedizione
 - Usa la spedizione dichiarata sopra. Se non specificata, usa €6 come stima prudente.
-- NON applicare commissioni di piattaforma: sarà il venditore a valutarle in base al canale scelto.
-- Se il margine lordo è sotto €15, metti score massimo 4.
+- NON applicare commissioni di piattaforma: sara il venditore a valutarle in base al canale scelto.
+- Se il margine lordo e sotto €15, metti score massimo 4.
 
 Rispondi SOLO con JSON valido, nessun testo extra:
 {{"score":7,"verdict":"AFFARE","valore_stimato":320,"margine_stimato":70,"motivazione":"max 15 parole","rischi":"max 10 parole"}}
@@ -141,10 +153,10 @@ Valori possibili per verdict: AFFARE (margine>40€), OK (margine 15-40€), EVI
         text = data["content"][0]["text"].replace("```json", "").replace("```", "").strip()
         result = json.loads(text)
 
-        # Sanity check: margine non può superare 3x il prezzo di acquisto
+        # Sanity check: margine non può superare 1.5x il prezzo di acquisto
         price_num = _extract_price_value(price) or 0
         if price_num > 0 and result.get("margine_stimato"):
-            max_margine = price_num * 3
+            max_margine = price_num * 1.5
             if result["margine_stimato"] > max_margine:
                 result["margine_stimato"] = round(max_margine * 0.5)
                 result["score"] = min(result.get("score", 5), 5)
