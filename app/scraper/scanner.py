@@ -13,8 +13,21 @@ SCRAPERAPI_URL    = "http://api.scraperapi.com"
 
 WEBSHARE_PROXY_USER = os.getenv("WEBSHARE_PROXY_USER")
 WEBSHARE_PROXY_PASS = os.getenv("WEBSHARE_PROXY_PASS")
-WEBSHARE_PROXY_HOST = "p.webshare.io"
-WEBSHARE_PROXY_PORT = "80"
+
+# Lista proxy Webshare con rotazione round-robin
+WEBSHARE_PROXIES = [
+    ("31.59.20.176",    "6754"),
+    ("198.23.239.134",  "6540"),
+    ("31.56.127.193",   "7684"),
+    ("45.38.107.97",    "6014"),
+    ("107.172.163.27",  "6543"),
+    ("216.10.27.159",   "6837"),
+    ("142.111.67.146",  "5611"),
+    ("191.96.254.138",  "6185"),
+    ("31.58.9.4",       "6077"),
+    ("23.229.19.94",    "8689"),
+]
+_proxy_index = 0
 
 SUPABASE_URL         = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
@@ -59,20 +72,26 @@ def _fetch_via_scraperapi(url: str) -> requests.Response:
 
 
 def _fetch_via_webshare(url: str) -> requests.Response:
-    proxy_url = (
-        f"http://{WEBSHARE_PROXY_USER}:{WEBSHARE_PROXY_PASS}"
-        f"@{WEBSHARE_PROXY_HOST}:{WEBSHARE_PROXY_PORT}"
-    )
-    proxies = {"http": proxy_url, "https": proxy_url}
-    for attempt in range(3):
+    """Rotazione round-robin tra i proxy disponibili con fallback automatico."""
+    global _proxy_index
+    errors = []
+    
+    for attempt in range(len(WEBSHARE_PROXIES)):
+        host, port = WEBSHARE_PROXIES[_proxy_index % len(WEBSHARE_PROXIES)]
+        _proxy_index += 1
+        
+        proxy_url = f"http://{WEBSHARE_PROXY_USER}:{WEBSHARE_PROXY_PASS}@{host}:{port}"
+        proxies = {"http": proxy_url, "https": proxy_url}
+        
         try:
             r = requests.get(url, headers=HEADERS, proxies=proxies, timeout=30)
             r.raise_for_status()
             return r
-        except requests.exceptions.HTTPError:
-            if attempt == 2:
-                raise
-            time.sleep(5 * (attempt + 1))
+        except Exception as e:
+            errors.append(f"{host}:{port} -> {str(e)[:50]}")
+            time.sleep(2)
+    
+    raise Exception(f"Tutti i proxy falliti: {errors}")
 
 
 def _fetch_direct(url: str) -> requests.Response:
