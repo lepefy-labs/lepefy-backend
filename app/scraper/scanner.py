@@ -8,21 +8,99 @@ import httpx
 from bs4 import BeautifulSoup
 from supabase import create_client, Client
 
-SCRAPERAPI_KEY = os.getenv("SCRAPERAPI_KEY")
-SCRAPERAPI_URL = "http://api.scraperapi.com"
+SCRAPERAPI_KEY    = os.getenv("SCRAPERAPI_KEY")
+SCRAPERAPI_URL    = "http://api.scraperapi.com"
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
+WEBSHARE_PROXY_USER = os.getenv("WEBSHARE_PROXY_USER")
+WEBSHARE_PROXY_PASS = os.getenv("WEBSHARE_PROXY_PASS")
+WEBSHARE_PROXY_HOST = "p.webshare.io"
+WEBSHARE_PROXY_PORT = "80"
+
+SUPABASE_URL         = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+ANTHROPIC_API_KEY    = os.getenv("ANTHROPIC_API_KEY")
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+# Modalita scraping: "scraperapi" | "webshare" | "direct"
+SCRAPER_MODE = os.getenv("SCRAPER_MODE", "scraperapi").lower()
 
 HAIKU_INPUT_COST_PER_M  = 0.80
 HAIKU_OUTPUT_COST_PER_M = 4.00
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "it-IT,it;q=0.9",
+}
 
 
 def _get_supabase() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
+
+# ──────────────────────────────────────────────
+# Metodi di fetch
+# ──────────────────────────────────────────────
+
+def _fetch_via_scraperapi(url: str) -> requests.Response:
+    params = {
+        "api_key": SCRAPERAPI_KEY,
+        "url": url,
+        "country_code": "it",
+    }
+    for attempt in range(3):
+        try:
+            r = requests.get(SCRAPERAPI_URL, params=params, timeout=60)
+            r.raise_for_status()
+            return r
+        except requests.exceptions.HTTPError:
+            if attempt == 2:
+                raise
+            time.sleep(5 * (attempt + 1))
+
+
+def _fetch_via_webshare(url: str) -> requests.Response:
+    proxy_url = (
+        f"http://{WEBSHARE_PROXY_USER}:{WEBSHARE_PROXY_PASS}"
+        f"@{WEBSHARE_PROXY_HOST}:{WEBSHARE_PROXY_PORT}"
+    )
+    proxies = {"http": proxy_url, "https": proxy_url}
+    for attempt in range(3):
+        try:
+            r = requests.get(url, headers=HEADERS, proxies=proxies, timeout=30)
+            r.raise_for_status()
+            return r
+        except requests.exceptions.HTTPError:
+            if attempt == 2:
+                raise
+            time.sleep(5 * (attempt + 1))
+
+
+def _fetch_direct(url: str) -> requests.Response:
+    """Chiamata diretta senza proxy — funziona solo in locale, bloccata su Railway."""
+    for attempt in range(3):
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=30)
+            r.raise_for_status()
+            return r
+        except requests.exceptions.HTTPError:
+            if attempt == 2:
+                raise
+            time.sleep(5 * (attempt + 1))
+
+
+def _fetch_html(url: str) -> requests.Response:
+    """Router: seleziona il metodo in base a SCRAPER_MODE."""
+    if SCRAPER_MODE == "webshare":
+        return _fetch_via_webshare(url)
+    elif SCRAPER_MODE == "direct":
+        return _fetch_direct(url)
+    else:  # default: scraperapi
+        return _fetch_via_scraperapi(url)
+
+
+# ──────────────────────────────────────────────
+# Estrazione dati
+# ──────────────────────────────────────────────
 
 def _extract_price_value(price_str: str) -> float | None:
     if not price_str or price_str == "N/D":
@@ -45,7 +123,6 @@ def _extract_price(ad: dict) -> str:
 
 
 def _extract_shipping(ad: dict) -> str:
-    """Estrae la spedizione dichiarata dal venditore nelle features."""
     features = ad.get("features", {})
     if isinstance(features, dict):
         shipping_feature = features.get("/shipping")
@@ -79,16 +156,15 @@ def _extract_location(ad: dict) -> str:
     return f"{city_val}, {region_val}".strip(", ")
 
 
+# ──────────────────────────────────────────────
+# AI Scoring
+# ──────────────────────────────────────────────
+
 def _score_ad(title: str, price: str, location: str, body: str, keyword: str, shipping: str) -> tuple[dict, dict]:
-    """
-    Chiama Claude Haiku per valutare l'annuncio.
-    Verifica pertinenza alla keyword e calcola margine lordo reale.
-    Ritorna (risultato_ai, usage).
-    """
     shipping_info = (
         f"Spedizione dichiarata dal venditore: {shipping}"
         if shipping and shipping != "non specificata"
-        else "Spedizione non specificata dal venditore — stima ~€6"
+        else "Spedizione non specificata dal venditore — stima €6"
     )
 
     prompt = f"""Sei un esperto di elettronica usata e flipping su marketplace italiani (Subito.it).
@@ -102,35 +178,31 @@ Città: {location}
 {shipping_info}
 Descrizione: {body[:800] if body else 'N/D'}
 
-REGOLA FONDAMENTALE: se l'articolo principale dell'annuncio NON corrisponde alla keyword cercata
-(es. viene citato solo come accessorio compatibile, nella lista modelli supportati, o come
-riferimento secondario), assegna score 1 e verdict EVITA con motivazione "Annuncio non pertinente".
+REGOLA FONDAMENTALE: se l'articolo principale NON corrisponde alla keyword cercata
+(citato solo come accessorio compatibile o riferimento secondario),
+assegna score 1 e verdict EVITA con motivazione "Annuncio non pertinente".
 
-Se l'annuncio è pertinente, stima il valore di rivendita REALE su Subito.it/eBay Italia.
-
-Analizza ogni componente elencato separatamente:
-- Corpo macchina: stima il valore usato reale sul mercato italiano
-- Ogni obiettivo: stima il valore usato reale separatamente
+Se pertinente, analizza ogni componente separatamente:
+- Corpo macchina: stima valore usato reale sul mercato italiano
+- Ogni obiettivo: stima valore usato reale separatamente
 - Accessori minori (borse, filtri, batterie extra, schede SD, tracolla):
   valgono poco usati (€5-20 cadauno), NON gonfiare il totale per la loro presenza
 
 Regole importanti:
 - Il valore totale di un kit e SEMPRE inferiore alla somma dei singoli pezzi
-  perché trovare un acquirente per un kit completo e piu difficile
 - Sii conservativo: meglio sottostimare che sovrastimare
-- Il valore di rivendita non puo essere superiore al 40% in piu del prezzo richiesto
-  per articoli comuni (corpi reflex, obiettivi standard)
+- Il valore di rivendita non puo superare del 40% il prezzo richiesto per articoli comuni
 
 Calcolo margine lordo:
 - margine_stimato = valore_rivendita_stimato - prezzo_acquisto - costo_spedizione
-- Usa la spedizione dichiarata sopra. Se non specificata, usa €6 come stima prudente.
-- NON applicare commissioni di piattaforma: sara il venditore a valutarle in base al canale scelto.
+- Usa la spedizione dichiarata. Se non specificata, usa €6.
+- NON applicare commissioni di piattaforma.
 - Se il margine lordo e sotto €15, metti score massimo 4.
 
 Rispondi SOLO con JSON valido, nessun testo extra:
 {{"score":7,"verdict":"AFFARE","valore_stimato":320,"margine_stimato":70,"motivazione":"max 15 parole","rischi":"max 10 parole"}}
 
-Valori possibili per verdict: AFFARE (margine>40€), OK (margine 15-40€), EVITA (margine<15€ o non pertinente)"""
+Valori verdict: AFFARE (margine>40€), OK (margine 15-40€), EVITA (margine<15€ o non pertinente)"""
 
     try:
         r = httpx.post(
@@ -175,27 +247,16 @@ Valori possibili per verdict: AFFARE (margine>40€), OK (margine 15-40€), EVI
         }, {}
 
 
+# ──────────────────────────────────────────────
+# Fetch Subito
+# ──────────────────────────────────────────────
+
 def _fetch_subito(keyword: str, max_results: int = 30) -> list[dict]:
     search_url = (
         f"https://www.subito.it/annunci-italia/vendita/usato/"
         f"?q={keyword.replace(' ', '+')}&sort=date_desc"
     )
-    params = {
-        "api_key": SCRAPERAPI_KEY,
-        "url": search_url,
-        "country_code": "it",
-    }
-
-    for attempt in range(3):
-        try:
-            response = requests.get(SCRAPERAPI_URL, params=params, timeout=60)
-            response.raise_for_status()
-            break
-        except requests.exceptions.HTTPError:
-            if attempt == 2:
-                raise
-            time.sleep(5 * (attempt + 1))
-
+    response = _fetch_html(search_url)
     soup = BeautifulSoup(response.text, "html.parser")
     next_data_tag = soup.find("script", id="__NEXT_DATA__")
     if not next_data_tag:
@@ -230,6 +291,10 @@ def _fetch_subito(keyword: str, max_results: int = 30) -> list[dict]:
     return results
 
 
+# ──────────────────────────────────────────────
+# Scan & Save
+# ──────────────────────────────────────────────
+
 def _get_active_keywords() -> list[str]:
     supabase = _get_supabase()
     response = (
@@ -242,13 +307,6 @@ def _get_active_keywords() -> list[str]:
 
 
 def _scan_keyword(keyword: str) -> dict:
-    """
-    Scansiona una keyword e salva nel pool condiviso scan_results.
-    - Claude chiamato SOLO per annunci nuovi o con prezzo cambiato
-    - Annunci non pertinenti o con margine <= 0 vengono scartati
-    - Annunci con prezzo cambiato vengono rivalutati e aggiornati in DB
-    - Spedizione reale estratta dall'annuncio e passata al prompt AI
-    """
     supabase = _get_supabase()
     items = _fetch_subito(keyword, max_results=30)
 
@@ -257,7 +315,6 @@ def _scan_keyword(keyword: str) -> dict:
                 "skipped": 0, "rejected": 0,
                 "tokens": {"input": 0, "output": 0, "cost_usd": 0.0}}
 
-    # Recupera URL e prezzi già presenti in DB per questa keyword
     existing_response = (
         supabase.table("scan_results")
         .select("url, price_value")
@@ -288,12 +345,10 @@ def _scan_keyword(keyword: str) -> dict:
         else:
             price_changed = False
 
-        # Pre-filtro leggero: la keyword deve apparire nel titolo
-        # o nei primi 200 caratteri del body — senza chiamare Claude
+        # Pre-filtro: keyword deve apparire nel titolo o nei primi 200 char del body
         keyword_lower = keyword.lower()
-        title_lower = item["title"].lower()
-        body_preview = item.get("body", "")[:200].lower()
-        if keyword_lower not in title_lower and keyword_lower not in body_preview:
+        if (keyword_lower not in item["title"].lower() and
+                keyword_lower not in item.get("body", "")[:200].lower()):
             rejected += 1
             continue
 
@@ -306,7 +361,6 @@ def _scan_keyword(keyword: str) -> dict:
 
         margine = ai.get("margine_stimato")
 
-        # Scarta annunci non pertinenti o con margine negativo/nullo
         if ai.get("verdict") == "EVITA" and ai.get("score") == 1:
             rejected += 1
             continue
@@ -324,7 +378,6 @@ def _scan_keyword(keyword: str) -> dict:
                 "rischi": ai.get("rischi"),
             }).eq("url", url).execute()
 
-            # Resetta notifications_log per rinotificare con il nuovo prezzo
             scan_ids = (
                 supabase.table("scan_results")
                 .select("id")
@@ -377,6 +430,7 @@ def _scan_keyword(keyword: str) -> dict:
         "updated": updated,
         "skipped": skipped,
         "rejected": rejected,
+        "scraper_mode": SCRAPER_MODE,
         "tokens": {
             "input": total_input,
             "output": total_output,
@@ -385,8 +439,11 @@ def _scan_keyword(keyword: str) -> dict:
     }
 
 
+# ──────────────────────────────────────────────
+# Entry points async
+# ──────────────────────────────────────────────
+
 async def run_lepe_scan(keyword: str, max_results: int = 15) -> list[dict]:
-    """Endpoint /test-scan: ritorna annunci senza filtrare né salvare."""
     try:
         return await asyncio.to_thread(_fetch_subito, keyword, max_results)
     except requests.exceptions.HTTPError as e:
@@ -400,10 +457,6 @@ async def run_lepe_scan(keyword: str, max_results: int = 15) -> list[dict]:
 
 
 async def run_scan_and_save() -> dict:
-    """
-    Cron job: legge le keyword attive da Supabase, scansiona ciascuna
-    una volta sola con 10 secondi di pausa tra l'una e l'altra.
-    """
     try:
         keywords = await asyncio.to_thread(_get_active_keywords)
         if not keywords:
@@ -419,6 +472,7 @@ async def run_scan_and_save() -> dict:
         total_cost = sum(r["tokens"]["cost_usd"] for r in results)
         return {
             "status": "ok",
+            "scraper_mode": SCRAPER_MODE,
             "keywords_scanned": len(keywords),
             "results": results,
             "total_cost_usd": round(total_cost, 5),
