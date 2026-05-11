@@ -171,6 +171,9 @@ def _run_notify_job() -> dict:
             reverse=True
         )
 
+        # Limita a 5 annunci per email — i restanti verranno inviati al ciclo successivo
+        new_deals = new_deals[:5]
+
         if not new_deals:
             results.append({"email": email, "keyword": keyword, "sent": 0})
             continue
