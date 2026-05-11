@@ -1,4 +1,5 @@
 import os
+from app.scraper.content_generator import run_content_job
 from fastapi import FastAPI
 from app.scraper.scanner import run_lepe_scan, run_scan_and_save
 from app.scraper.notifier import run_notify_job
@@ -137,6 +138,12 @@ async def market_active_listings(
         limit=limit,
     )
 
+@app.get("/cron/content")
+async def cron_content(secret: str = Query(...)):
+    if secret != os.environ.get("CRON_SECRET"):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    result = run_content_job()
+    return result
 
 # ---------------------------------------------------------------------------
 # Debug (da rimuovere in produzione)
