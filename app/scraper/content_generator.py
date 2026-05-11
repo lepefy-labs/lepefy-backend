@@ -2,7 +2,8 @@
 content_generator.py
 Legge i top deal delle ultime 24h da scan_results,
 genera caption + hashtag per Instagram, TikTok e Facebook
-tramite Claude Haiku, e invia tutto via email con Brevo.
+tramite Claude Haiku, invia tutto via email con Brevo
+e logga i token consumati su ai_usage_log.
 """
 
 import os
@@ -12,17 +13,21 @@ from datetime import datetime, timezone, timedelta
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
-SUPABASE_URL        = os.environ["SUPABASE_URL"]
+SUPABASE_URL         = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
-ANTHROPIC_API_KEY   = os.environ["ANTHROPIC_API_KEY"]
-BREVO_API_KEY       = os.environ["BREVO_API_KEY"]
-EMAIL_FROM          = os.environ["EMAIL_FROM"]
-EMAIL_FROM_NAME     = os.environ.get("EMAIL_FROM_NAME", "Lepefy")
-CONTENT_EMAIL_TO    = os.environ["CONTENT_EMAIL_TO"]   # la tua email personale
+ANTHROPIC_API_KEY    = os.environ["ANTHROPIC_API_KEY"]
+BREVO_API_KEY        = os.environ["BREVO_API_KEY"]
+EMAIL_FROM           = os.environ["EMAIL_FROM"]
+EMAIL_FROM_NAME      = os.environ.get("EMAIL_FROM_NAME", "Lepefy")
+CONTENT_EMAIL_TO     = os.environ["CONTENT_EMAIL_TO"]
 
-TOP_N_DEALS         = 3    # quanti deal processare
-MIN_SCORE           = 6    # score minimo per essere considerato
-HOURS_LOOKBACK      = 24   # finestra temporale
+TOP_N_DEALS    = 3
+MIN_SCORE      = 6
+HOURS_LOOKBACK = 24
+
+# Prezzi Haiku ($ per milione di token)
+HAIKU_INPUT_PRICE  = 0.80 / 1_000_000
+HAIKU_OUTPUT_PRICE = 0.40 / 1_000_000
 
 LOGO_URL = "https://osonphsavryefwmlhkyv.supabase.co/storage/v1/object/public/assets/lepefy-logo-email.png"
 
@@ -37,9 +42,7 @@ def _supabase_headers() -> dict:
 
 
 def _fetch_top_deals() -> list[dict]:
-    """Recupera i top deal delle ultime HOURS_LOOKBACK ore ordinati per score."""
     since = (datetime.now(timezone.utc) - timedelta(hours=HOURS_LOOKBACK)).isoformat()
-
     params = {
         "select": "title,price_value,score,margine_stimato,motivazione,keyword,location,url",
         "created_at": f"gte.{since}",
@@ -47,7 +50,6 @@ def _fetch_top_deals() -> list[dict]:
         "order": "score.desc",
         "limit": str(TOP_N_DEALS),
     }
-
     with httpx.Client() as client:
         resp = client.get(
             f"{SUPABASE_URL}/rest/v1/scan_results",
@@ -57,6 +59,27 @@ def _fetch_top_deals() -> list[dict]:
         )
         resp.raise_for_status()
         return resp.json()
+
+
+def _log_ai_usage(input_tokens: int, output_tokens: int, deals_scored: int) -> None:
+    cost = (input_tokens * HAIKU_INPUT_PRICE) + (output_tokens * HAIKU_OUTPUT_PRICE)
+    record = {
+        "keyword":       "content_generator",
+        "input_tokens":  input_tokens,
+        "output_tokens": output_tokens,
+        "cost_usd":      round(cost, 6),
+        "deals_scored":  deals_scored,
+    }
+    try:
+        with httpx.Client() as client:
+            client.post(
+                f"{SUPABASE_URL}/rest/v1/ai_usage_log",
+                headers=_supabase_headers(),
+                json=record,
+                timeout=10,
+            )
+    except Exception:
+        pass  # log failure non blocca il flusso
 
 
 # ─── Claude ───────────────────────────────────────────────────────────────────
@@ -87,8 +110,10 @@ Rispondi con questo JSON esatto:
 }}"""
 
 
-def _generate_content_for_deal(deal: dict) -> dict:
-    """Chiama Claude Haiku per generare le caption per un singolo deal."""
+def _generate_content_for_deal(deal: dict) -> tuple[dict, int, int]:
+    """
+    Chiama Claude Haiku e ritorna (content, input_tokens, output_tokens).
+    """
     prompt = USER_PROMPT_TEMPLATE.format(
         title=deal.get("title", "N/A"),
         price=deal.get("price_value", "?"),
@@ -97,14 +122,12 @@ def _generate_content_for_deal(deal: dict) -> dict:
         motivazione=deal.get("motivazione", "N/A"),
         location=deal.get("location", "Italia"),
     )
-
     payload = {
         "model": "claude-haiku-4-5-20251001",
         "max_tokens": 1000,
         "system": SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": prompt}],
     }
-
     with httpx.Client() as client:
         resp = client.post(
             "https://api.anthropic.com/v1/messages",
@@ -119,26 +142,23 @@ def _generate_content_for_deal(deal: dict) -> dict:
         resp.raise_for_status()
         data = resp.json()
 
-    raw = data["content"][0]["text"].strip()
+    input_tokens  = data.get("usage", {}).get("input_tokens", 0)
+    output_tokens = data.get("usage", {}).get("output_tokens", 0)
 
-    # Rimuove eventuali backtick markdown
+    raw = data["content"][0]["text"].strip()
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
             raw = raw[4:]
     raw = raw.strip()
 
-    return json.loads(raw)
+    return json.loads(raw), input_tokens, output_tokens
 
 
 # ─── Email HTML ───────────────────────────────────────────────────────────────
 
 def _platform_badge(platform: str) -> str:
-    colors = {
-        "instagram": "#E1306C",
-        "tiktok":    "#000000",
-        "facebook":  "#1877F2",
-    }
+    colors = {"instagram": "#E1306C", "tiktok": "#000000", "facebook": "#1877F2"}
     color = colors.get(platform, "#666")
     return (
         f'<span style="display:inline-block;background:{color};color:white;'
@@ -148,11 +168,11 @@ def _platform_badge(platform: str) -> str:
 
 
 def _deal_block_html(deal: dict, content: dict, index: int) -> str:
-    title    = deal.get("title", "N/A")
-    price    = deal.get("price_value", "?")
-    margine  = deal.get("margine_stimato", "?")
-    score    = deal.get("score", "?")
-    url      = deal.get("url", "#")
+    title   = deal.get("title", "N/A")
+    price   = deal.get("price_value", "?")
+    margine = deal.get("margine_stimato", "?")
+    score   = deal.get("score", "?")
+    url     = deal.get("url", "#")
 
     platforms_html = ""
     for platform in ["instagram", "tiktok", "facebook"]:
@@ -169,7 +189,6 @@ def _deal_block_html(deal: dict, content: dict, index: int) -> str:
 
     return f"""
     <div style="margin-bottom:32px;border:1px solid #E8E5DF;border-radius:12px;overflow:hidden;">
-      <!-- Deal header -->
       <div style="background:#FFF1EC;padding:16px 20px;border-bottom:1px solid #FFD5C2;">
         <div style="font-size:11px;font-family:monospace;color:#999;margin-bottom:4px;">
           DEAL #{index} &nbsp;·&nbsp; SCORE {score}/10 &nbsp;·&nbsp; MARGINE €{margine}
@@ -177,67 +196,42 @@ def _deal_block_html(deal: dict, content: dict, index: int) -> str:
         <div style="font-size:16px;font-weight:700;color:#111;margin-bottom:4px;">{title}</div>
         <div style="font-size:14px;color:#FF4D00;font-weight:600;">€{price}</div>
         <div style="margin-top:8px;">
-          <a href="{url}" style="font-size:12px;color:#6366F1;text-decoration:none;">
-            → Vedi annuncio
-          </a>
+          <a href="{url}" style="font-size:12px;color:#6366F1;text-decoration:none;">→ Vedi annuncio</a>
         </div>
       </div>
-      <!-- Captions -->
-      <div style="padding:20px;">
-        {platforms_html}
-      </div>
+      <div style="padding:20px;">{platforms_html}</div>
     </div>"""
 
 
 def _build_email_html(deals: list[dict], contents: list[dict]) -> str:
-    today = datetime.now().strftime("%d %B %Y")
+    today     = datetime.now().strftime("%d %B %Y")
     deals_html = "".join(
         _deal_block_html(deal, content, i + 1)
         for i, (deal, content) in enumerate(zip(deals, contents))
     )
-
-    return f"""
-<!DOCTYPE html>
+    return f"""<!DOCTYPE html>
 <html lang="it">
 <head><meta charset="UTF-8"/></head>
 <body style="margin:0;padding:0;background:#F9F8F6;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif;">
   <div style="max-width:620px;margin:0 auto;padding:32px 16px;">
-
-    <!-- Logo -->
     <div style="text-align:center;margin-bottom:32px;">
       <img src="{LOGO_URL}" alt="Lepefy" height="36" style="height:36px;"/>
     </div>
-
-    <!-- Header -->
     <div style="background:#111110;border-radius:12px;padding:28px 24px;margin-bottom:28px;text-align:center;">
-      <div style="font-size:11px;font-family:monospace;color:#666;letter-spacing:0.12em;
-                  text-transform:uppercase;margin-bottom:8px;">Contenuti Social · {today}</div>
-      <div style="font-size:22px;font-weight:800;color:white;letter-spacing:-0.03em;">
-        {len(deals)} deal pronti da pubblicare
-      </div>
-      <div style="font-size:14px;color:rgba(255,255,255,0.4);margin-top:6px;">
-        Caption generate da AI per Instagram, TikTok e Facebook
-      </div>
+      <div style="font-size:11px;font-family:monospace;color:#666;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:8px;">Contenuti Social · {today}</div>
+      <div style="font-size:22px;font-weight:800;color:white;letter-spacing:-0.03em;">{len(deals)} deal pronti da pubblicare</div>
+      <div style="font-size:14px;color:rgba(255,255,255,0.4);margin-top:6px;">Caption generate da AI per Instagram, TikTok e Facebook</div>
     </div>
-
-    <!-- Deal blocks -->
     {deals_html}
-
-    <!-- Footer tip -->
     <div style="background:#F0F0EE;border-radius:8px;padding:16px 20px;margin-top:8px;">
       <div style="font-size:12px;color:#888;line-height:1.6;">
         💡 <strong>Tip:</strong> posta su TikTok prima, poi condividi su Instagram Reels e Facebook.
         Il formato video con screen recording dell'annuncio converte meglio del solo testo.
       </div>
     </div>
-
-    <!-- Footer -->
     <div style="text-align:center;margin-top:28px;">
-      <div style="font-size:11px;font-family:monospace;color:#CCC;letter-spacing:0.06em;">
-        LEPEFY · CONTENUTI AUTOMATICI · {today}
-      </div>
+      <div style="font-size:11px;font-family:monospace;color:#CCC;letter-spacing:0.06em;">LEPEFY · CONTENUTI AUTOMATICI · {today}</div>
     </div>
-
   </div>
 </body>
 </html>"""
@@ -248,19 +242,15 @@ def _build_email_html(deals: list[dict], contents: list[dict]) -> str:
 def _send_email(html: str, n_deals: int) -> bool:
     today = datetime.now().strftime("%d/%m/%Y")
     payload = {
-        "sender":  {"email": EMAIL_FROM, "name": EMAIL_FROM_NAME},
-        "to":      [{"email": CONTENT_EMAIL_TO}],
-        "subject": f"📱 Lepefy · {n_deals} contenuti social pronti — {today}",
+        "sender":      {"email": EMAIL_FROM, "name": EMAIL_FROM_NAME},
+        "to":          [{"email": CONTENT_EMAIL_TO}],
+        "subject":     f"📱 Lepefy · {n_deals} contenuti social pronti — {today}",
         "htmlContent": html,
     }
-
     with httpx.Client() as client:
         resp = client.post(
             "https://api.brevo.com/v3/smtp/email",
-            headers={
-                "api-key": BREVO_API_KEY,
-                "Content-Type": "application/json",
-            },
+            headers={"api-key": BREVO_API_KEY, "Content-Type": "application/json"},
             json=payload,
             timeout=15,
         )
@@ -270,33 +260,45 @@ def _send_email(html: str, n_deals: int) -> bool:
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
 def run_content_job() -> dict:
-    """Funzione principale chiamata dall'endpoint cron."""
-
     # 1. Fetch deal
     deals = _fetch_top_deals()
     if not deals:
         return {"status": "skip", "reason": "Nessun deal con score sufficiente nelle ultime 24h"}
 
-    # 2. Genera contenuti per ogni deal
-    contents = []
-    errors   = []
+    # 2. Genera contenuti tracciando i token
+    contents      = []
+    errors        = []
+    total_input   = 0
+    total_output  = 0
+
     for deal in deals:
         try:
-            content = _generate_content_for_deal(deal)
+            content, inp, out = _generate_content_for_deal(deal)
             contents.append(content)
+            total_input  += inp
+            total_output += out
         except Exception as e:
             errors.append(str(e))
             contents.append({"instagram": "Errore generazione", "tiktok": "", "facebook": ""})
 
-    # 3. Costruisci email
-    html = _build_email_html(deals, contents)
+    # 3. Log token su ai_usage_log
+    _log_ai_usage(total_input, total_output, len(deals))
 
-    # 4. Invia
+    # 4. Calcola costo
+    cost_usd = round(
+        (total_input * HAIKU_INPUT_PRICE) + (total_output * HAIKU_OUTPUT_PRICE), 6
+    )
+
+    # 5. Costruisci e invia email
+    html = _build_email_html(deals, contents)
     sent = _send_email(html, len(deals))
 
     return {
-        "status":    "ok" if sent else "email_error",
-        "deals":     len(deals),
-        "errors":    errors,
-        "sent":      sent,
+        "status":        "ok" if sent else "email_error",
+        "deals":         len(deals),
+        "errors":        errors,
+        "sent":          sent,
+        "input_tokens":  total_input,
+        "output_tokens": total_output,
+        "cost_usd":      cost_usd,
     }
