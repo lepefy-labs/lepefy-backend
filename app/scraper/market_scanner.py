@@ -251,16 +251,20 @@ def _is_relevant(title: str, keyword: str, price_value: float | None, categoria:
     title_lower = title.lower()
     keyword_lower = keyword.lower()
 
-    # Filtro 1 — keyword nel titolo (word boundary approssimato)
-    # Cerca ogni token della keyword nel titolo
+    # Filtro 1 — keyword nel titolo
     keyword_tokens = keyword_lower.split()
-    if not all(token in title_lower for token in keyword_tokens):
-        return False, "keyword_non_nel_titolo"
+    keyword_in_title = all(token in title_lower for token in keyword_tokens)
 
     # Filtro 2 — blacklist accessori
-    for word in ACCESSORY_BLACKLIST:
-        if word in title_lower:
-            return False, f"accessorio_blacklist:{word}"
+    # Applicata SOLO se la keyword non è nel titolo:
+    # se la keyword c'è, il prodotto principale è quello cercato
+    # e parole come "caricabatterie" descrivono accessori inclusi, non il prodotto.
+    if not keyword_in_title:
+        for word in ACCESSORY_BLACKLIST:
+            if word in title_lower:
+                return False, f"accessorio_blacklist:{word}"
+        # Keyword non nel titolo e nessuna blacklist: scartiamo comunque
+        return False, "keyword_non_nel_titolo"
 
     # Filtro 3 — price range
     if price_value is not None and categoria in PRICE_RANGES:
@@ -295,7 +299,7 @@ def _fetch_subito_market(keyword: str, max_results: int = 100) -> list[dict]:
         params = {
             "api_key":      SCRAPERAPI_KEY,
             "url":          search_url,
-           # "country_code": "it",
+            "country_code": "it",
         }
 
         try:
