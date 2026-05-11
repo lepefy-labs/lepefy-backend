@@ -139,9 +139,9 @@ async def market_active_listings(
     )
 
 @app.get("/cron/content")
-async def cron_content(secret: str = Query(...)):
+async def cron_content(secret: str = ""):
     if secret != os.environ.get("CRON_SECRET"):
-        raise HTTPException(status_code=401, detail="Unauthorized")
+        return {"error": "unauthorized"}
     result = run_content_job()
     return result
 
