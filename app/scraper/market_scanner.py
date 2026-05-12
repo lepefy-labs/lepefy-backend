@@ -300,9 +300,8 @@ def _fetch_subito_market(keyword: str, max_results: int = 100) -> list[dict]:
         )
         search_url = base_url if page == 1 else f"{base_url}&o={offset}"
         params = {
-            "api_key":      SCRAPERAPI_KEY,
-            "url":          search_url,
-            "country_code": "it",
+            "api_key": SCRAPERAPI_KEY,
+            "url":     search_url,
         }
 
         try:
