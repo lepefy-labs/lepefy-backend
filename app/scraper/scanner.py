@@ -13,6 +13,8 @@ SCRAPERAPI_URL    = "http://api.scraperapi.com"
 
 WEBSHARE_PROXY_USER = os.getenv("WEBSHARE_PROXY_USER")
 WEBSHARE_PROXY_PASS = os.getenv("WEBSHARE_PROXY_PASS")
+WEBSHARE_PROXY_HOST = "p.webshare.io"
+WEBSHARE_PROXY_PORT = "80"
 
 # Lista proxy Webshare con rotazione round-robin
 WEBSHARE_PROXIES = [
@@ -75,14 +77,14 @@ def _fetch_via_webshare(url: str) -> requests.Response:
     """Rotazione round-robin tra i proxy disponibili con fallback automatico."""
     global _proxy_index
     errors = []
-    
+
     for attempt in range(len(WEBSHARE_PROXIES)):
         host, port = WEBSHARE_PROXIES[_proxy_index % len(WEBSHARE_PROXIES)]
         _proxy_index += 1
-        
+
         proxy_url = f"http://{WEBSHARE_PROXY_USER}:{WEBSHARE_PROXY_PASS}@{host}:{port}"
         proxies = {"http": proxy_url, "https": proxy_url}
-        
+
         try:
             r = requests.get(url, headers=HEADERS, proxies=proxies, timeout=30)
             r.raise_for_status()
@@ -90,12 +92,12 @@ def _fetch_via_webshare(url: str) -> requests.Response:
         except Exception as e:
             errors.append(f"{host}:{port} -> {str(e)[:50]}")
             time.sleep(2)
-    
+
     raise Exception(f"Tutti i proxy falliti: {errors}")
 
 
 def _fetch_direct(url: str) -> requests.Response:
-    """Chiamata diretta senza proxy — funziona solo in locale, bloccata su Railway."""
+    """Chiamata diretta senza proxy — funziona solo in locale."""
     for attempt in range(3):
         try:
             r = requests.get(url, headers=HEADERS, timeout=30)
@@ -113,7 +115,7 @@ def _fetch_html(url: str) -> requests.Response:
         return _fetch_via_webshare(url)
     elif SCRAPER_MODE == "direct":
         return _fetch_direct(url)
-    else:  # default: scraperapi
+    else:
         return _fetch_via_scraperapi(url)
 
 
@@ -180,6 +182,11 @@ def _extract_location(ad: dict) -> str:
 # ──────────────────────────────────────────────
 
 def _score_ad(title: str, price: str, location: str, body: str, keyword: str, shipping: str) -> tuple[dict, dict]:
+    """
+    Chiama Claude Haiku per valutare l'annuncio.
+    Retry automatico su errore 529 (API sovraccarica) — max 3 tentativi.
+    Ritorna (risultato_ai, usage).
+    """
     shipping_info = (
         f"Spedizione dichiarata dal venditore: {shipping}"
         if shipping and shipping != "non specificata"
@@ -223,47 +230,56 @@ Rispondi SOLO con JSON valido, nessun testo extra:
 
 Valori verdict: AFFARE (margine>40€), OK (margine 15-40€), EVITA (margine<15€ o non pertinente)"""
 
-    try:
-        r = httpx.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": "claude-haiku-4-5-20251001",
-                "max_tokens": 200,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=20,
-        )
-        r.raise_for_status()
-        data = r.json()
-        usage = data.get("usage", {})
-        text = data["content"][0]["text"].replace("```json", "").replace("```", "").strip()
-        result = json.loads(text)
+    for attempt in range(3):
+        try:
+            r = httpx.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 200,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+                timeout=20,
+            )
+            r.raise_for_status()
+            data = r.json()
+            usage = data.get("usage", {})
+            text = data["content"][0]["text"].replace("```json", "").replace("```", "").strip()
+            result = json.loads(text)
 
-        # Sanity check: margine non può superare 1.5x il prezzo di acquisto
-        price_num = _extract_price_value(price) or 0
-        if price_num > 0 and result.get("margine_stimato"):
-            max_margine = price_num * 1.5
-            if result["margine_stimato"] > max_margine:
-                result["margine_stimato"] = round(max_margine * 0.5)
-                result["score"] = min(result.get("score", 5), 5)
-                result["verdict"] = "OK"
+            # Sanity check: margine non può superare 1.5x il prezzo di acquisto
+            price_num = _extract_price_value(price) or 0
+            if price_num > 0 and result.get("margine_stimato"):
+                max_margine = price_num * 1.5
+                if result["margine_stimato"] > max_margine:
+                    result["margine_stimato"] = round(max_margine * 0.5)
+                    result["score"] = min(result.get("score", 5), 5)
+                    result["verdict"] = "OK"
 
-        return result, usage
+            return result, usage
 
-    except Exception as e:
-        return {
-            "score": None,
-            "verdict": "N/D",
-            "valore_stimato": None,
-            "margine_stimato": None,
-            "motivazione": f"Scoring non disponibile: {str(e)[:50]}",
-            "rischi": "",
-        }, {}
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 529 and attempt < 2:
+                # API sovraccarica — attendi e riprova
+                time.sleep(10 * (attempt + 1))  # 10s poi 20s
+                continue
+            # Altri errori HTTP o terzo tentativo fallito
+            return {"score": None, "verdict": "N/D", "valore_stimato": None,
+                    "margine_stimato": None, "motivazione": f"Errore API: {str(e)[:50]}",
+                    "rischi": ""}, {}
+        except Exception as e:
+            return {"score": None, "verdict": "N/D", "valore_stimato": None,
+                    "margine_stimato": None, "motivazione": f"Scoring non disponibile: {str(e)[:50]}",
+                    "rischi": ""}, {}
+
+    return {"score": None, "verdict": "N/D", "valore_stimato": None,
+            "margine_stimato": None, "motivazione": "Scoring non disponibile dopo 3 tentativi",
+            "rischi": ""}, {}
 
 
 # ──────────────────────────────────────────────
@@ -326,6 +342,14 @@ def _get_active_keywords() -> list[str]:
 
 
 def _scan_keyword(keyword: str) -> dict:
+    """
+    Scansiona una keyword e salva nel pool condiviso scan_results.
+    - Claude chiamato SOLO per annunci nuovi o con prezzo cambiato
+    - Retry su errore 529 (max 3 tentativi, backoff 10s/20s)
+    - Annunci con scoring fallito (N/D) vengono scartati
+    - Annunci non pertinenti o con margine <= 0 vengono scartati
+    - Annunci con prezzo calato >= 15% vengono rivalutati e rinotificati
+    """
     supabase = _get_supabase()
     items = _fetch_subito(keyword, max_results=30)
 
@@ -334,6 +358,7 @@ def _scan_keyword(keyword: str) -> dict:
                 "skipped": 0, "rejected": 0,
                 "tokens": {"input": 0, "output": 0, "cost_usd": 0.0}}
 
+    # Recupera URL e prezzi già presenti in DB per questa keyword
     existing_response = (
         supabase.table("scan_results")
         .select("url, price_value")
@@ -357,17 +382,27 @@ def _scan_keyword(keyword: str) -> dict:
         price_value = item["price_value"]
 
         if url in existing:
-            if existing[url] == price_value:
+            old_price = existing[url]
+            if old_price == price_value:
                 skipped += 1
                 continue
-            price_changed = True
+            # Rinotifica solo se il prezzo è calato di almeno il 15%
+            if old_price and (old_price - price_value) / old_price >= 0.15:
+                price_changed = True
+            else:
+                # Prezzo cambiato ma calo < 15% — aggiorna DB senza rinotificare
+                supabase.table("scan_results").update({
+                    "price_raw": item["price"],
+                    "price_value": price_value,
+                }).eq("url", url).execute()
+                skipped += 1
+                continue
         else:
             price_changed = False
 
         # Pre-filtro: keyword deve apparire nel titolo o nei primi 200 char del body
-        keyword_lower = keyword  # gia lowercase dalla normalizzazione
-        if (keyword_lower not in item["title"].lower() and
-                keyword_lower not in item.get("body", "")[:200].lower()):
+        if (keyword not in item["title"].lower() and
+                keyword not in item.get("body", "")[:200].lower()):
             rejected += 1
             continue
 
@@ -378,8 +413,14 @@ def _scan_keyword(keyword: str) -> dict:
         total_input  += usage.get("input_tokens", 0)
         total_output += usage.get("output_tokens", 0)
 
+        # Scarta annunci con scoring fallito (errore 529 o altro)
+        if ai.get("verdict") == "N/D" or ai.get("score") is None:
+            rejected += 1
+            continue
+
         margine = ai.get("margine_stimato")
 
+        # Scarta annunci non pertinenti o con margine negativo/nullo
         if ai.get("verdict") == "EVITA" and ai.get("score") == 1:
             rejected += 1
             continue
@@ -397,6 +438,7 @@ def _scan_keyword(keyword: str) -> dict:
                 "rischi": ai.get("rischi"),
             }).eq("url", url).execute()
 
+            # Resetta notifications_log per rinotificare con il nuovo prezzo
             scan_ids = (
                 supabase.table("scan_results")
                 .select("id")
@@ -463,6 +505,7 @@ def _scan_keyword(keyword: str) -> dict:
 # ──────────────────────────────────────────────
 
 async def run_lepe_scan(keyword: str, max_results: int = 15) -> list[dict]:
+    """Endpoint /test-scan: ritorna annunci senza filtrare né salvare."""
     try:
         return await asyncio.to_thread(_fetch_subito, keyword, max_results)
     except requests.exceptions.HTTPError as e:
@@ -476,6 +519,10 @@ async def run_lepe_scan(keyword: str, max_results: int = 15) -> list[dict]:
 
 
 async def run_scan_and_save() -> dict:
+    """
+    Cron job: legge le keyword attive da Supabase, scansiona ciascuna
+    una volta sola con 10 secondi di pausa tra l'una e l'altra.
+    """
     try:
         keywords = await asyncio.to_thread(_get_active_keywords)
         if not keywords:
