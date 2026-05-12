@@ -291,11 +291,14 @@ def _fetch_subito_market(keyword: str, max_results: int = 100) -> list[dict]:
     per_page = 30
 
     while len(results) < max_results:
+        # Prima pagina senza offset (identico a scanner.py che funziona).
+        # Dalla seconda in poi usa &o= per la paginazione.
         offset = (page - 1) * per_page
-        search_url = (
+        base_url = (
             f"https://www.subito.it/annunci-italia/vendita/usato/"
-            f"?q={keyword.replace(' ', '+')}&sort=date_desc&o={offset}"
+            f"?q={keyword.replace(' ', '+')}&sort=date_desc"
         )
+        search_url = base_url if page == 1 else f"{base_url}&o={offset}"
         params = {
             "api_key":      SCRAPERAPI_KEY,
             "url":          search_url,
