@@ -308,17 +308,20 @@ def _fetch_subito_market(keyword: str, max_results: int = 100) -> list[dict]:
         try:
             response = requests.get(SCRAPERAPI_URL, params=params, timeout=60)
             response.raise_for_status()
-        except Exception:
+        except Exception as e:
+            print(f"[market_scanner] fetch error keyword={keyword} page={page}: {e}")
             break
 
         soup = BeautifulSoup(response.text, "html.parser")
         next_data_tag = soup.find("script", id="__NEXT_DATA__")
         if not next_data_tag:
+            print(f"[market_scanner] __NEXT_DATA__ non trovato keyword={keyword} page={page} http={response.status_code} html_len={len(response.text)}")
             break
 
         try:
             next_data = json.loads(next_data_tag.string)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            print(f"[market_scanner] JSON parse error keyword={keyword} page={page}: {e}")
             break
 
         items_data = (
