@@ -420,11 +420,11 @@ def _scan_keyword(keyword: str) -> dict:
 
         margine = ai.get("margine_stimato")
 
-        # Scarta annunci non pertinenti o con margine negativo/nullo
+        # Scarta annunci non pertinenti o con margine sotto soglia minima
         if ai.get("verdict") == "EVITA" and ai.get("score") == 1:
             rejected += 1
             continue
-        if margine is not None and margine <= 0:
+        if margine is None or margine < 15:
             rejected += 1
             continue
 
