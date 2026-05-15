@@ -1,9 +1,8 @@
 import os
-from app.scraper.content_generator import run_content_job
-from fastapi import FastAPI, HTTPException, Query
-from fastapi import Request
 import hashlib
+from fastapi import FastAPI, Request
 from app.scraper.scanner import run_lepe_scan, run_scan_and_save
+from app.scraper.scorer import run_score_job
 from app.scraper.notifier import run_notify_job
 from app.scraper.market_scanner import run_market_scan
 from app.scraper.market_analytics import (
@@ -42,19 +41,30 @@ async def test_scan(q: str = "ThinkPad"):
 @app.get("/cron/scan")
 async def cron_scan(secret: str = ""):
     """
-    Legge le keyword attive da Supabase, scansiona ciascuna una volta sola
-    e salva i deal nel pool condiviso scan_results.
+    Fetch Subito per ogni keyword attiva e salva annunci grezzi (scored=false).
+    Nessuna chiamata AI o eBay — veloce e resiliente.
     """
     if secret != os.getenv("CRON_SECRET"):
         return {"error": "unauthorized"}
     return await run_scan_and_save()
 
 
+@app.get("/cron/score")
+async def cron_score(secret: str = ""):
+    """
+    Legge annunci con scored=false, chiama eBay + Claude Haiku,
+    aggiorna score e margine in scan_results.
+    """
+    if secret != os.getenv("CRON_SECRET"):
+        return {"error": "unauthorized"}
+    return await run_score_job()
+
+
 @app.get("/cron/notify")
 async def cron_notify(secret: str = ""):
     """
-    Per ogni subscription attiva, invia i deal non ancora notificati
-    che rientrano nella fascia prezzo dell'utente.
+    Per ogni subscription attiva, invia i deal scored=true
+    non ancora notificati che rientrano nella fascia prezzo.
     """
     if secret != os.getenv("CRON_SECRET"):
         return {"error": "unauthorized"}
@@ -69,7 +79,6 @@ async def cron_notify(secret: str = ""):
 async def cron_market_scan(secret: str = ""):
     """
     Scansiona la tassonomia fissa di mercato e aggiorna market_snapshots.
-    Suggerita frequenza: 1-2 volte al giorno.
     """
     if secret != os.getenv("CRON_SECRET"):
         return {"error": "unauthorized"}
@@ -86,10 +95,6 @@ async def market_price_stats(
     condizione: str | None = None,
     giorni: int = 90,
 ):
-    """
-    Statistiche di prezzo per un modello.
-    Esempio: /market/price-stats?modello=A7 III&condizione=Ottime condizioni
-    """
     return get_price_stats(modello=modello, condizione=condizione, giorni=giorni)
 
 
@@ -99,10 +104,6 @@ async def market_time_to_sell(
     condizione: str | None = None,
     giorni: int = 180,
 ):
-    """
-    Tempo medio di vendita per un modello.
-    Esempio: /market/time-to-sell?modello=PS5
-    """
     return get_time_to_sell(modello=modello, condizione=condizione, giorni=giorni)
 
 
@@ -112,11 +113,6 @@ async def market_price_trend(
     giorni: int = 90,
     bucket: str = "week",
 ):
-    """
-    Andamento del prezzo mediano nel tempo.
-    bucket: day | week | month
-    Esempio: /market/price-trend?modello=A7 III&bucket=week
-    """
     return get_price_trend(modello=modello, giorni=giorni, bucket=bucket)
 
 
@@ -128,10 +124,6 @@ async def market_active_listings(
     condizione: str | None = None,
     limit: int = 50,
 ):
-    """
-    Annunci attivi filtrabili per categoria, marca, modello, condizione.
-    Esempio: /market/active?categoria=fotografia&marca=Sony
-    """
     return get_active_listings(
         categoria=categoria,
         marca=marca,
@@ -140,73 +132,16 @@ async def market_active_listings(
         limit=limit,
     )
 
-@app.get("/cron/content")
-async def cron_content(secret: str = ""):
-    if secret != os.environ.get("CRON_SECRET"):
-        return {"error": "unauthorized"}
-    result = run_content_job()
-    return result
 
 # ---------------------------------------------------------------------------
-# Debug (da rimuovere in produzione)
+# eBay Marketplace Account Deletion (GDPR compliance)
 # ---------------------------------------------------------------------------
-
-@app.get("/debug/hades")
-async def debug_hades():
-    import httpx
-    api_key = os.getenv("SCRAPERAPI_KEY")
-    target = "https://www.subito.it/hades/v1/search/items/?q=ThinkPad&lim=3&sort=datedesc"
-    r = httpx.get(
-        "http://api.scraperapi.com/",
-        params={
-            "api_key": api_key,
-            "url": target,
-            "country_code": "it",
-            "keep_headers": "true",
-        },
-        headers={
-            "Origin": "https://www.subito.it",
-            "Referer": "https://www.subito.it/annunci-italia/vendita/usato/?q=ThinkPad",
-            "Accept": "application/json",
-            "x-source": "subito-ui",
-        },
-        timeout=30,
-    )
-    return {"status": r.status_code, "body": r.text[:1000]}
-
-
-@app.get("/debug/static")
-async def debug_static():
-    import httpx
-    api_key = os.getenv("SCRAPERAPI_KEY")
-    r = httpx.get(
-        "http://api.scraperapi.com/",
-        params={
-            "api_key": api_key,
-            "url": "https://www.subito.it/annunci-italia/vendita/usato/?q=ThinkPad",
-            "country_code": "it",
-        },
-        timeout=30,
-    )
-    html = r.text
-    marker = "__NEXT_DATA__"
-    found = marker in html
-    preview = ""
-    if found:
-        start = html.find(marker)
-        preview = html[start : start + 200]
-    return {
-        "http_status":    r.status_code,
-        "next_data_found": found,
-        "preview":        preview,
-        "html_length":    len(html),
-    }
 
 @app.get("/ebay/account-deletion")
 async def ebay_account_deletion_challenge(challenge_code: str = ""):
     """
-    Validazione endpoint eBay — risponde al challenge di verifica.
-    eBay si aspetta: SHA256(challenge_code + verification_token + endpoint_url)
+    Validazione endpoint eBay.
+    SHA256(challenge_code + verification_token + endpoint_url)
     """
     if challenge_code:
         verification_token = os.getenv("EBAY_VERIFICATION_TOKEN", "")
@@ -216,10 +151,45 @@ async def ebay_account_deletion_challenge(challenge_code: str = ""):
         return {"challengeResponse": challenge_response}
     return {"ack": "Success"}
 
+
 @app.post("/ebay/account-deletion")
 async def ebay_account_deletion(request: Request):
-    """
-    Endpoint richiesto da eBay per compliance GDPR.
-    Riceve notifiche di cancellazione account utente eBay.
-    """
+    """Riceve notifiche di cancellazione account eBay (GDPR)."""
     return {"ack": "Success"}
+
+
+# ---------------------------------------------------------------------------
+# Debug (da rimuovere in produzione)
+# ---------------------------------------------------------------------------
+
+@app.get("/debug/scraperapi")
+async def debug_scraperapi():
+    import httpx
+    api_key = os.getenv("SCRAPERAPI_KEY")
+    r = httpx.get(f"http://api.scraperapi.com/account?api_key={api_key}", timeout=10)
+    return r.json()
+
+
+@app.get("/debug/static")
+async def debug_static():
+    import httpx
+    api_key = os.getenv("SCRAPERAPI_KEY")
+    r = httpx.get(
+        "http://api.scraperapi.com/",
+        params={"api_key": api_key,
+                "url": "https://www.subito.it/annunci-italia/vendita/usato/?q=ThinkPad"},
+        timeout=30,
+    )
+    html = r.text
+    marker = "__NEXT_DATA__"
+    found = marker in html
+    preview = ""
+    if found:
+        start = html.find(marker)
+        preview = html[start: start + 200]
+    return {
+        "http_status": r.status_code,
+        "next_data_found": found,
+        "preview": preview,
+        "html_length": len(html),
+    }
