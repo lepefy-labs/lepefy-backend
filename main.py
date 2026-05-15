@@ -162,6 +162,19 @@ async def ebay_account_deletion(request: Request):
 # Debug (da rimuovere in produzione)
 # ---------------------------------------------------------------------------
 
+@app.get("/debug/ebay")
+async def debug_ebay(q: str = "Canon EOS 90D"):
+    """Testa la chiamata eBay Completed Listings per una query specifica."""
+    from app.scraper.scorer import _get_ebay_market_value
+    result = _get_ebay_market_value(q)
+    ebay_value, debug_info = result if isinstance(result, tuple) else (result, {})
+    return {
+        "query": q,
+        "ebay_app_id_set": bool(os.getenv("EBAY_APP_ID")),
+        "ebay_value": ebay_value,
+        "debug": debug_info,
+    }
+
 @app.get("/debug/scraperapi")
 async def debug_scraperapi():
     import httpx
