@@ -199,3 +199,11 @@ async def debug_static():
         "preview":        preview,
         "html_length":    len(html),
     }
+
+@app.post("/ebay/account-deletion")
+async def ebay_account_deletion(request: Request):
+    """
+    Endpoint richiesto da eBay per compliance GDPR.
+    Riceve notifiche di cancellazione account utente eBay.
+    """
+    return {"ack": "Success"}
