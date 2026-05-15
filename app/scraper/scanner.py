@@ -262,14 +262,14 @@ def _score_ad(title: str, price: str, location: str, body: str, keyword: str, sh
         else "Spedizione non specificata dal venditore — stima €6"
     )
 
-    ebay_anchor = (
-        f"Valore di mercato REALE (mediana vendite concluse eBay Italia, netto fee 12%): €{ebay_value}
-"
-        f"Usa questo come riferimento principale per il valore_stimato. "
-        f"Il margine_stimato deve essere calcolato rispetto a questo valore, non a prezzi di annunci attivi."
-        if ebay_value
-        else "Nessun dato eBay disponibile — stima il valore di mercato basandoti sulla tua conoscenza del settore."
-    )
+    if ebay_value:
+        ebay_anchor = (
+            f"Valore di mercato REALE (mediana vendite concluse eBay Italia, netto fee 12%): €{ebay_value}. "
+            f"Usa questo come riferimento principale per il valore_stimato. "
+            f"Il margine_stimato deve essere calcolato rispetto a questo valore, non a prezzi di annunci attivi."
+        )
+    else:
+        ebay_anchor = "Nessun dato eBay disponibile — stima il valore di mercato basandoti sulla tua conoscenza del settore."
 
     prompt = f"""Sei un esperto di elettronica usata e flipping su marketplace italiani (Subito.it).
 
