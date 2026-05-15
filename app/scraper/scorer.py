@@ -61,8 +61,6 @@ def _get_ebay_market_value(title: str) -> float | None:
         "GLOBAL-ID": "EBAY-IT",
         "itemFilter(0).name": "SoldItemsOnly",
         "itemFilter(0).value": "true",
-        "itemFilter(1).name": "Condition",
-        "itemFilter(1).value": "3000",
         "sortOrder": "EndTimeSoonest",
         "paginationInput.entriesPerPage": "20",
     }
