@@ -61,6 +61,8 @@ def _get_ebay_market_value(title: str) -> float | None:
         "GLOBAL-ID": "EBAY-IT",
         "itemFilter(0).name": "SoldItemsOnly",
         "itemFilter(0).value": "true",
+        "itemFilter(1).name": "Condition",
+        "itemFilter(1).value": "3000",
         "sortOrder": "EndTimeSoonest",
         "paginationInput.entriesPerPage": "20",
     }
@@ -295,6 +297,7 @@ def _run_score_job() -> dict:
         # 1. Recupera valore eBay
         ebay_result = _get_ebay_market_value(title)
         ebay_value, ebay_debug = ebay_result if isinstance(ebay_result, tuple) else (ebay_result, {})
+        time.sleep(0.5)  # evita rate limit eBay
 
         # 2. Se prezzo Subito >= valore eBay → scarta senza chiamare Claude
         if ebay_value and isinstance(ebay_value, (int, float)) and ebay_value <= price_value:
