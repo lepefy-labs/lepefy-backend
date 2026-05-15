@@ -2,6 +2,7 @@ import os
 from app.scraper.content_generator import run_content_job
 from fastapi import FastAPI, HTTPException, Query
 from fastapi import Request
+import hashlib
 from app.scraper.scanner import run_lepe_scan, run_scan_and_save
 from app.scraper.notifier import run_notify_job
 from app.scraper.market_scanner import run_market_scan
@@ -200,6 +201,20 @@ async def debug_static():
         "preview":        preview,
         "html_length":    len(html),
     }
+
+@app.get("/ebay/account-deletion")
+async def ebay_account_deletion_challenge(challenge_code: str = ""):
+    """
+    Validazione endpoint eBay — risponde al challenge di verifica.
+    eBay si aspetta: SHA256(challenge_code + verification_token + endpoint_url)
+    """
+    if challenge_code:
+        verification_token = os.getenv("EBAY_VERIFICATION_TOKEN", "")
+        endpoint = "https://lepefy-backend-production.up.railway.app/ebay/account-deletion"
+        hash_input = challenge_code + verification_token + endpoint
+        challenge_response = hashlib.sha256(hash_input.encode()).hexdigest()
+        return {"challengeResponse": challenge_response}
+    return {"ack": "Success"}
 
 @app.post("/ebay/account-deletion")
 async def ebay_account_deletion(request: Request):
