@@ -34,6 +34,9 @@ _proxy_index = 0
 SUPABASE_URL         = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 ANTHROPIC_API_KEY    = os.getenv("ANTHROPIC_API_KEY")
+EBAY_APP_ID          = os.getenv("EBAY_APP_ID")
+EBAY_API_URL         = "https://svcs.ebay.com/services/search/FindingService/v1"
+EBAY_FEE_RATE        = 0.12  # fee eBay ~12%, nettata dal prezzo venduto
 
 # Modalita scraping: "scraperapi" | "webshare" | "direct"
 SCRAPER_MODE = os.getenv("SCRAPER_MODE", "scraperapi").lower()
@@ -178,10 +181,76 @@ def _extract_location(ad: dict) -> str:
 
 
 # ──────────────────────────────────────────────
+# eBay Completed Listings
+# ──────────────────────────────────────────────
+
+def _get_ebay_market_value(title: str) -> float | None:
+    """
+    Interroga eBay Finding API per gli articoli venduti (completed listings).
+    Ritorna la mediana dei prezzi nettata delle fee eBay (~12%).
+    Ritorna None se meno di 5 risultati — Claude userà la stima AI come fallback.
+    """
+    if not EBAY_APP_ID:
+        return None
+
+    # Usa i primi 5 token del titolo come query — abbastanza specifici, non troppo rigidi
+    search_terms = " ".join(title.split()[:5])
+
+    params = {
+        "OPERATION-NAME": "findCompletedItems",
+        "SERVICE-VERSION": "1.0.0",
+        "SECURITY-APPNAME": EBAY_APP_ID,
+        "RESPONSE-DATA-FORMAT": "JSON",
+        "keywords": search_terms,
+        "GLOBAL-ID": "EBAY-IT",
+        "itemFilter(0).name": "SoldItemsOnly",
+        "itemFilter(0).value": "true",
+        "itemFilter(1).name": "Condition",
+        "itemFilter(1).value": "3000",  # Used
+        "sortOrder": "EndTimeSoonest",
+        "paginationInput.entriesPerPage": "20",
+    }
+
+    try:
+        r = httpx.get(EBAY_API_URL, params=params, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+
+        resp = data.get("findCompletedItemsResponse", [{}])[0]
+        items = resp.get("searchResult", [{}])[0].get("item", [])
+
+        prices = []
+        for item in items:
+            try:
+                price = float(
+                    item.get("sellingStatus", [{}])[0]
+                    .get("currentPrice", [{}])[0]
+                    .get("__value__", 0)
+                )
+                if price > 0:
+                    prices.append(price)
+            except (IndexError, KeyError, ValueError):
+                continue
+
+        if len(prices) < 5:
+            return None  # troppo pochi dati, fallback su stima AI
+
+        # Mediana dei prezzi venduti
+        prices.sort()
+        median = prices[len(prices) // 2]
+
+        # Netta le fee eBay (~12%) per ottenere il valore netto al venditore
+        return round(median * (1 - EBAY_FEE_RATE), 2)
+
+    except Exception:
+        return None
+
+
+# ──────────────────────────────────────────────
 # AI Scoring
 # ──────────────────────────────────────────────
 
-def _score_ad(title: str, price: str, location: str, body: str, keyword: str, shipping: str) -> tuple[dict, dict]:
+def _score_ad(title: str, price: str, location: str, body: str, keyword: str, shipping: str, ebay_value: float | None = None) -> tuple[dict, dict]:
     """
     Chiama Claude Haiku per valutare l'annuncio.
     Retry automatico su errore 529 (API sovraccarica) — max 3 tentativi.
@@ -193,6 +262,15 @@ def _score_ad(title: str, price: str, location: str, body: str, keyword: str, sh
         else "Spedizione non specificata dal venditore — stima €6"
     )
 
+    ebay_anchor = (
+        f"Valore di mercato REALE (mediana vendite concluse eBay Italia, netto fee 12%): €{ebay_value}
+"
+        f"Usa questo come riferimento principale per il valore_stimato. "
+        f"Il margine_stimato deve essere calcolato rispetto a questo valore, non a prezzi di annunci attivi."
+        if ebay_value
+        else "Nessun dato eBay disponibile — stima il valore di mercato basandoti sulla tua conoscenza del settore."
+    )
+
     prompt = f"""Sei un esperto di elettronica usata e flipping su marketplace italiani (Subito.it).
 
 Keyword cercata: "{keyword}"
@@ -202,6 +280,7 @@ Titolo: {title}
 Prezzo richiesto: {price}
 Città: {location}
 {shipping_info}
+{ebay_anchor}
 Descrizione: {body[:800] if body else 'N/D'}
 
 REGOLA FONDAMENTALE: se l'articolo principale NON corrisponde alla keyword cercata
@@ -406,9 +485,19 @@ def _scan_keyword(keyword: str) -> dict:
             rejected += 1
             continue
 
+        # Recupera valore di mercato reale da eBay Completed Listings
+        ebay_value = _get_ebay_market_value(item["title"])
+
+        # Se il prezzo Subito è >= valore eBay, il margine è certamente negativo
+        # Scarta immediatamente senza chiamare Claude — risparmio token
+        if ebay_value and ebay_value <= item["price_value"]:
+            rejected += 1
+            continue
+
         ai, usage = _score_ad(
             item["title"], item["price"], item["location"],
-            item.get("body", ""), keyword, item.get("shipping", "non specificata")
+            item.get("body", ""), keyword, item.get("shipping", "non specificata"),
+            ebay_value=ebay_value
         )
         total_input  += usage.get("input_tokens", 0)
         total_output += usage.get("output_tokens", 0)
@@ -436,6 +525,7 @@ def _scan_keyword(keyword: str) -> dict:
                 "margine_stimato": margine,
                 "motivazione": ai.get("motivazione"),
                 "rischi": ai.get("rischi"),
+                "ebay_valore_mercato": ebay_value,
             }).eq("url", url).execute()
 
             # Resetta notifications_log per rinotificare con il nuovo prezzo
@@ -463,6 +553,7 @@ def _scan_keyword(keyword: str) -> dict:
                 "margine_stimato": margine,
                 "motivazione": ai.get("motivazione"),
                 "rischi": ai.get("rischi"),
+                "ebay_valore_mercato": ebay_value,
             })
 
     if new_rows:
