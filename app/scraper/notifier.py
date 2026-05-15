@@ -154,6 +154,7 @@ def _run_notify_job() -> dict:
             supabase.table("scan_results")
             .select("*")
             .ilike("keyword", keyword)
+            .eq("scored", True)
             .gte("price_value", min_price)
             .lte("price_value", max_price)
             .order("score", desc=True)
