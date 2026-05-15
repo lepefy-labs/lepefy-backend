@@ -1,6 +1,7 @@
 import os
 from app.scraper.content_generator import run_content_job
 from fastapi import FastAPI, HTTPException, Query
+from fastapi import Request
 from app.scraper.scanner import run_lepe_scan, run_scan_and_save
 from app.scraper.notifier import run_notify_job
 from app.scraper.market_scanner import run_market_scan
