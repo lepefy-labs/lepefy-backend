@@ -121,11 +121,15 @@ Calcolo margine lordo:
 - Se il margine lordo e sotto 15 euro, metti score massimo 4.
 
 Rispondi SOLO con JSON valido, nessun testo extra:
-{{"score":7,"verdict":"AFFARE","valore_stimato":320,"margine_stimato":70,"motivazione":"max 15 parole","rischi":"max 10 parole","sconto_consigliato":25}}
+{{"score":7,"verdict":"AFFARE","valore_stimato":320,"margine_stimato":70,"motivazione":"max 15 parole","rischi":"solo se difetti esplicitamente dichiarati dal venditore, altrimenti stringa vuota","sconto_consigliato":25}}
 
 sconto_consigliato: stima in euro quanto potresti negoziare in ribasso sul prezzo richiesto.
 Su Subito tra privati il 10-15% e normale, oltre il 20% difficile da ottenere.
 Esprimi sempre in euro interi.
+
+Nel campo rischi riporta SOLO difetti o problemi esplicitamente dichiarati dal venditore nell annuncio.
+Se il venditore non dichiara nessun problema, lascia rischi come stringa vuota "".
+Non ipotizzare problemi generici tipici dell usato.
 
 Valori verdict: AFFARE (margine>40), OK (margine 15-40), EVITA (margine<15 o non pertinente)"""
 
