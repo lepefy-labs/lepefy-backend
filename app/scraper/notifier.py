@@ -156,6 +156,8 @@ def _run_notify_job() -> dict:
             .select("*")
             .ilike("keyword", keyword)
             .eq("scored", True)
+            .gte("score", 2)
+            .gte("margine_stimato", 15)
             .gte("price_value", min_price)
             .lte("price_value", max_price)
             .order("score", desc=True)
