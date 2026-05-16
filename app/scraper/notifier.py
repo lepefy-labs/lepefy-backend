@@ -45,6 +45,7 @@ def _build_email_html(deals: list[dict]) -> str:
             <div style="font-size:18px;font-weight:700;color:#1a1a1a;">{d.get('price_raw','N/D')}</div>
             <div style="margin-top:4px;font-size:12px;color:#555;">Margine: {margine_html}</div>
             <div style="margin-top:4px;font-size:12px;color:#555;">Score: {score_html}</div>
+            {f'<div style="margin-top:4px;font-size:12px;color:#2563eb;">Tratta: -€{d["sconto_consigliato"]} → margine €{int((d["margine_stimato"] or 0) + d["sconto_consigliato"])}</div>' if d.get("sconto_consigliato") else ""}
             {f'<div style="margin-top:4px;font-size:11px;color:#9ca3af;">eBay: €{d["ebay_valore_mercato"]}</div>' if d.get("ebay_valore_mercato") else ""}
           </td>
           <td style="padding:12px 8px;border-bottom:1px solid #f0f0f0;text-align:center;vertical-align:top;">
