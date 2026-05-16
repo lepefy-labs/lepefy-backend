@@ -22,9 +22,7 @@ from supabase import create_client, Client
 SUPABASE_URL         = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 ANTHROPIC_API_KEY    = os.getenv("ANTHROPIC_API_KEY")
-EBAY_APP_ID          = os.getenv("EBAY_APP_ID")
-EBAY_API_URL         = "https://svcs.ebay.com/services/search/FindingService/v1"
-EBAY_FEE_RATE        = 0.12
+# eBay integration rimossa — findCompletedItems deprecato. Campo ebay_valore_mercato mantenuto in DB per uso futuro.
 
 HAIKU_INPUT_COST_PER_M  = 0.80
 HAIKU_OUTPUT_COST_PER_M = 4.00
@@ -35,85 +33,6 @@ SCORE_BATCH_SIZE = int(os.getenv("SCORE_BATCH_SIZE", "50"))
 
 def _get_supabase() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-
-
-# ──────────────────────────────────────────────
-# eBay Completed Listings
-# ──────────────────────────────────────────────
-
-def _get_ebay_market_value(title: str) -> float | None:
-    """
-    Interroga eBay Finding API per gli articoli venduti.
-    Ritorna la mediana dei prezzi nettata delle fee eBay (~12%).
-    Ritorna None se meno di 5 risultati.
-    """
-    if not EBAY_APP_ID:
-        return None
-
-    search_terms = " ".join(title.split()[:5])
-
-    params = {
-        "OPERATION-NAME": "findCompletedItems",
-        "SERVICE-VERSION": "1.0.0",
-        "SECURITY-APPNAME": EBAY_APP_ID,
-        "RESPONSE-DATA-FORMAT": "JSON",
-        "keywords": search_terms,
-        "GLOBAL-ID": "EBAY-IT",
-        "itemFilter(0).name": "SoldItemsOnly",
-        "itemFilter(0).value": "true",
-        "itemFilter(1).name": "Condition",
-        "itemFilter(1).value": "3000",
-        "sortOrder": "EndTimeSoonest",
-        "paginationInput.entriesPerPage": "20",
-    }
-
-    try:
-        r = httpx.get(EBAY_API_URL, params=params, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-
-        resp = data.get("findCompletedItemsResponse", [{}])[0]
-        ack = resp.get("ack", ["N/D"])[0]
-        total_found = resp.get("paginationOutput", [{}])[0].get("totalEntries", ["0"])[0]
-        items = resp.get("searchResult", [{}])[0].get("item", [])
-
-        # Debug info sempre disponibile
-        debug_info = {
-            "search_terms": search_terms,
-            "ack": ack,
-            "total_found": total_found,
-            "items_returned": len(items),
-        }
-
-        prices = []
-        for item in items:
-            try:
-                price = float(
-                    item.get("sellingStatus", [{}])[0]
-                    .get("currentPrice", [{}])[0]
-                    .get("__value__", 0)
-                )
-                if price > 0:
-                    prices.append(price)
-            except (IndexError, KeyError, ValueError):
-                continue
-
-        debug_info["prices_extracted"] = prices
-        debug_info["prices_count"] = len(prices)
-
-        if len(prices) < 5:
-            debug_info["result"] = f"None — meno di 5 prezzi ({len(prices)} trovati)"
-            return None, debug_info
-
-        prices.sort()
-        median = prices[len(prices) // 2]
-        result = round(median * (1 - EBAY_FEE_RATE), 2)
-        debug_info["median_gross"] = median
-        debug_info["result"] = result
-        return result, debug_info
-
-    except Exception as e:
-        return None, {"error": str(e), "search_terms": search_terms}
 
 
 # ──────────────────────────────────────────────
@@ -187,16 +106,26 @@ Se pertinente, analizza ogni componente separatamente:
 Regole importanti:
 - Il valore totale di un kit e SEMPRE inferiore alla somma dei singoli pezzi
 - Sii conservativo: meglio sottostimare che sovrastimare
-- Il valore di rivendita non puo superare del 40% il prezzo richiesto per articoli comuni
+- Per prodotti vintage o di nicchia (Leica, Olympus, fotocamere analogiche anni 70-80,
+  obiettivi rari): aumenta l incertezza, score massimo 6 salvo casi eccezionali documentati
+- Se non hai dati sufficienti per stimare il valore con ragionevole certezza,
+  metti score massimo 5 e segnalalo nella motivazione
 
 Calcolo margine lordo:
 - margine_stimato = valore_rivendita_stimato - prezzo_acquisto - costo_spedizione
 - Usa la spedizione dichiarata. Se non specificata, usa 6 euro.
 - NON applicare commissioni di piattaforma.
+- Applica un margine di sicurezza del 20% sul valore_stimato per tenere conto
+  della differenza tra asking price e prezzi di vendita reali:
+  usa valore_stimato * 0.80 come base per il calcolo del margine
 - Se il margine lordo e sotto 15 euro, metti score massimo 4.
 
 Rispondi SOLO con JSON valido, nessun testo extra:
-{{"score":7,"verdict":"AFFARE","valore_stimato":320,"margine_stimato":70,"motivazione":"max 15 parole","rischi":"max 10 parole"}}
+{{"score":7,"verdict":"AFFARE","valore_stimato":320,"margine_stimato":70,"motivazione":"max 15 parole","rischi":"max 10 parole","sconto_consigliato":25}}
+
+sconto_consigliato: stima in euro quanto potresti negoziare in ribasso sul prezzo richiesto.
+Su Subito tra privati il 10-15% e normale, oltre il 20% difficile da ottenere.
+Esprimi sempre in euro interi.
 
 Valori verdict: AFFARE (margine>40), OK (margine 15-40), EVITA (margine<15 o non pertinente)"""
 
@@ -294,26 +223,8 @@ def _run_score_job() -> dict:
         shipping = ad.get("shipping", "non specificata")
         ad_id = ad["id"]
 
-        # 1. Recupera valore eBay
-        ebay_result = _get_ebay_market_value(title)
-        ebay_value, ebay_debug = ebay_result if isinstance(ebay_result, tuple) else (ebay_result, {})
-        time.sleep(0.5)  # evita rate limit eBay
-
-        # 2. Se prezzo Subito >= valore eBay → scarta senza chiamare Claude
-        if ebay_value and isinstance(ebay_value, (int, float)) and ebay_value <= price_value:
-            supabase.table("scan_results").update({
-                "scored": True,
-                "score": 1,
-                "verdict": "EVITA",
-                "margine_stimato": None,
-                "motivazione": "Prezzo superiore al valore di mercato eBay",
-                "rischi": "",
-                "ebay_valore_mercato": ebay_value,
-            }).eq("id", ad_id).execute()
-            rejected += 1
-            continue
-
-        # 3. Scoring AI
+        # Scoring AI
+        ebay_value = None  # riservato per integrazione futura
         condition = ad.get("condition", "non specificata")
         ai, usage = _score_ad(title, price, location, body, keyword, shipping, condition, ebay_value)
 
@@ -354,10 +265,12 @@ def _run_score_job() -> dict:
         supabase.table("scan_results").update({
             "scored": True,
             "score": ai.get("score"),
+            "valore_stimato": ai.get("valore_stimato"),
             "margine_stimato": margine,
             "motivazione": ai.get("motivazione"),
             "rischi": ai.get("rischi"),
             "ebay_valore_mercato": ebay_value,
+            "sconto_consigliato": ai.get("sconto_consigliato"),
         }).eq("id", ad_id).execute()
         scored += 1
 
