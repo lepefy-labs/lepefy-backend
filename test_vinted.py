@@ -1,228 +1,170 @@
 """
-test_vinted.py — Test integrazione Vinted per Lepefy
-Aggiungere temporaneamente a main.py come endpoint GET /test-vinted
-oppure eseguire standalone con: python test_vinted.py
-
-Testa tre approcci in sequenza e stampa quale funziona.
+test_vinted.py v2 — Test integrazione Vinted per Lepefy
+Aggiungere a main.py come: from test_vinted import run_tests
+                             @app.get("/test-vinted")
+                             async def _(): return run_tests()
 """
 
-import os
 import json
 import time
-import urllib.parse
 import requests
 
-SCRAPERAPI_KEY = os.environ.get("SCRAPERAPI_KEY", "")
+VINTED_HOME = "https://www.vinted.it"
 
-# Endpoint interno Vinted
-VINTED_BASE = "https://www.vinted.it/web/api/core/catalog/items"
-
-# Parametri di ricerca: fotocamere Canon, categoria fotografia
-TEST_PARAMS = {
-    "page": 1,
-    "per_page": 20,
-    "search_text": "canon",
-    "catalog_ids": 3848,   # fotografia
-    "order": "newest_first",
+HEADERS_HOME = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "it-IT,it;q=0.9",
 }
 
+HEADERS_API = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "it-IT,it;q=0.9",
+    "Referer": "https://www.vinted.it/catalog",
+    "X-Requested-With": "XMLHttpRequest",
+}
 
-# ─── Approccio 1: ScraperAPI (JSON endpoint, no render) ──────────────────────
+# Endpoint candidati da testare
+ENDPOINTS = [
+    "/web/api/core/catalog/items",
+    "/api/v2/catalog/items",
+    "/api/v2/items",
+]
 
-def test_scraperapi_json():
-    """ScraperAPI su endpoint JSON Vinted — il più veloce se funziona."""
-    if not SCRAPERAPI_KEY:
-        return None, "SCRAPERAPI_KEY non settata"
-
-    target_url = VINTED_BASE + "?" + urllib.parse.urlencode(TEST_PARAMS)
-    proxy_url = (
-        f"http://scraperapi:{SCRAPERAPI_KEY}@proxy-server.scraperapi.com:8001"
-    )
-    proxies = {"http": proxy_url, "https": proxy_url}
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
-        "Accept": "application/json",
-        "Accept-Language": "it-IT,it;q=0.9",
-        "Referer": "https://www.vinted.it/",
-    }
-
-    try:
-        r = requests.get(target_url, headers=headers, proxies=proxies, timeout=30, verify=False)
-        return r.status_code, r.headers.get("Content-Type", ""), r.text[:2000]
-    except Exception as e:
-        return None, str(e), ""
+# catalog_ids candidati per vinted.it
+# None = solo search_text, massima probabilita' di risultati
+CATALOG_IDS_CANDIDATES = [
+    None,
+    3848,   # fotografia (da URL vinted.it/catalog/3848-photography)
+    2994,   # elettronica (da URL vinted.it/catalog/2994-electronics)
+    1920,   # valore trovato in articolo reverse engineering
+]
 
 
-# ─── Approccio 2: ScraperAPI via query param (metodo alternativo) ─────────────
-
-def test_scraperapi_queryparam():
-    """ScraperAPI come query param — stesso risultato ma auth diversa."""
-    if not SCRAPERAPI_KEY:
-        return None, "SCRAPERAPI_KEY non settata", ""
-
-    target_url = VINTED_BASE + "?" + urllib.parse.urlencode(TEST_PARAMS)
-    sa_url = "http://api.scraperapi.com"
-    params = {
-        "api_key": SCRAPERAPI_KEY,
-        "url": target_url,
-        "country_code": "it",
-    }
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
-        "Accept": "application/json",
-        "Accept-Language": "it-IT,it;q=0.9",
-    }
-
-    try:
-        r = requests.get(sa_url, params=params, headers=headers, timeout=30)
-        return r.status_code, r.headers.get("Content-Type", ""), r.text[:2000]
-    except Exception as e:
-        return None, str(e), ""
-
-
-# ─── Approccio 3: cookie auth diretta (senza proxy) ──────────────────────────
-
-def test_direct_with_cookies():
-    """
-    Replica il flusso browser: prima GET alla home per ottenere
-    access_token_web dai cookie, poi chiama l'API.
-    Funziona solo se Datadome non blocca l'IP di Railway.
-    """
+def get_session():
+    """Crea sessione con cookie Datadome validi."""
     session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
-        "Accept-Language": "it-IT,it;q=0.9",
-    })
+    session.headers.update(HEADERS_HOME)
+    r = session.get(VINTED_HOME, timeout=15)
+    cookies = dict(session.cookies)
+    has_token = "access_token_web" in cookies
+    print(f"  Home: {r.status_code} | token: {has_token} | cookies: {list(cookies.keys())}")
+    return session, has_token
+
+
+def try_endpoint(session, endpoint, catalog_id, search_text="canon"):
+    """Prova un endpoint con un catalog_id specifico."""
+    params = {
+        "page": 1,
+        "per_page": 20,
+        "search_text": search_text,
+        "order": "newest_first",
+        "time": int(time.time()),
+    }
+    if catalog_id is not None:
+        params["catalog_ids"] = catalog_id
+
+    url = VINTED_HOME + endpoint
+    session.headers.update(HEADERS_API)
 
     try:
-        # Step 1: visita home per ottenere token
-        r_home = session.get("https://www.vinted.it", timeout=15)
-        cookies = dict(session.cookies)
-        has_token = "access_token_web" in cookies
+        r = session.get(url, params=params, timeout=15)
+        ct = r.headers.get("Content-Type", "")
+        is_json = "json" in ct and r.text.strip().startswith("{")
 
-        # Step 2: chiama API con i cookie ottenuti
-        session.headers.update({
-            "Accept": "application/json, text/plain, */*",
-            "Referer": "https://www.vinted.it/catalog/3848-photography",
-            "X-Requested-With": "XMLHttpRequest",
-        })
-        r_api = session.get(VINTED_BASE, params=TEST_PARAMS, timeout=15)
+        raw_items = []
+        items = []
+        if is_json:
+            data = r.json()
+            raw_items = data.get("items", [])
+            for it in raw_items[:3]:
+                items.append({
+                    "id": it.get("id"),
+                    "title": it.get("title"),
+                    "price": it.get("price"),
+                    "total_item_price": it.get("total_item_price"),
+                    "service_fee": it.get("service_fee"),
+                    "currency": it.get("currency"),
+                    "brand": it.get("brand_title"),
+                    "condition": it.get("status"),
+                    "url": it.get("url"),
+                })
 
-        return (
-            r_home.status_code,
-            r_api.status_code,
-            has_token,
-            r_api.headers.get("Content-Type", ""),
-            r_api.text[:2000]
-        )
+        return {
+            "endpoint": endpoint,
+            "catalog_id": catalog_id,
+            "status": r.status_code,
+            "content_type": ct,
+            "is_json": is_json,
+            "item_count": len(raw_items) if is_json else 0,
+            "items_preview": items,
+            "raw_preview": r.text[:300] if not is_json else "",
+        }
     except Exception as e:
-        return None, None, False, str(e), ""
+        return {
+            "endpoint": endpoint,
+            "catalog_id": catalog_id,
+            "status": None,
+            "error": str(e),
+            "is_json": False,
+            "item_count": 0,
+            "items_preview": [],
+        }
 
-
-# ─── Parser risposta ──────────────────────────────────────────────────────────
-
-def parse_items(raw_text):
-    """Prova a estrarre items dalla risposta JSON."""
-    try:
-        data = json.loads(raw_text)
-        items = data.get("items", [])
-        if not items:
-            return []
-        # Campi utili per Lepefy
-        parsed = []
-        for it in items[:3]:
-            parsed.append({
-                "id": it.get("id"),
-                "title": it.get("title"),
-                "price_value": it.get("price"),            # prezzo venditore
-                "total_item_price": it.get("total_item_price"),  # prezzo acquirente (con fee)
-                "service_fee": it.get("service_fee"),      # fee acquirente
-                "currency": it.get("currency"),
-                "brand": it.get("brand_title"),
-                "condition": it.get("status"),
-                "url": it.get("url"),
-                "photo": it.get("photo", {}).get("url") if it.get("photo") else None,
-            })
-        return parsed
-    except Exception as e:
-        return [{"parse_error": str(e)}]
-
-
-# ─── Main ─────────────────────────────────────────────────────────────────────
 
 def run_tests():
-    results = {}
+    results = {"session": {}, "endpoint_tests": [], "winner": None}
 
     print("=" * 60)
-    print("TEST VINTED INTEGRATION — Lepefy")
+    print("TEST VINTED v2 - endpoint + catalog_id discovery")
     print("=" * 60)
 
-    # Test 1
-    print("\n[1/3] ScraperAPI via proxy string...")
-    status, ct, body = test_scraperapi_json()
-    results["scraperapi_proxy"] = {
-        "status": status, "content_type": ct,
-        "is_json": "json" in str(ct).lower(),
-        "items": parse_items(body) if "json" in str(ct).lower() else [],
-        "raw_preview": body[:300],
-    }
-    print(f"  Status: {status} | Content-Type: {ct}")
-    if results["scraperapi_proxy"]["items"]:
-        print(f"  ✅ Items parsati: {len(results['scraperapi_proxy']['items'])}")
-        print(f"  Primo item: {results['scraperapi_proxy']['items'][0]}")
-    else:
-        print(f"  ❌ Nessun item | Preview: {body[:200]}")
+    print("\n[AUTH] Ottengo cookie da vinted.it...")
+    session, has_token = get_session()
+    results["session"]["has_token"] = has_token
 
-    time.sleep(2)
+    if not has_token:
+        print("  WARN: Nessun token - Datadome potrebbe bloccare le API calls.")
 
-    # Test 2
-    print("\n[2/3] ScraperAPI via query param...")
-    status, ct, body = test_scraperapi_queryparam()
-    results["scraperapi_queryparam"] = {
-        "status": status, "content_type": ct,
-        "is_json": "json" in str(ct).lower(),
-        "items": parse_items(body) if "json" in str(ct).lower() else [],
-        "raw_preview": body[:300],
-    }
-    print(f"  Status: {status} | Content-Type: {ct}")
-    if results["scraperapi_queryparam"]["items"]:
-        print(f"  ✅ Items parsati: {len(results['scraperapi_queryparam']['items'])}")
-    else:
-        print(f"  ❌ Nessun item | Preview: {body[:200]}")
+    time.sleep(1)
 
-    time.sleep(2)
+    print("\n[SCAN] Test combinazioni endpoint / catalog_id...")
+    for endpoint in ENDPOINTS:
+        for catalog_id in CATALOG_IDS_CANDIDATES:
+            label = f"{endpoint} | catalog={catalog_id}"
+            res = try_endpoint(session, endpoint, catalog_id)
+            results["endpoint_tests"].append(res)
 
-    # Test 3
-    print("\n[3/3] Chiamata diretta con cookie session...")
-    home_status, api_status, has_token, ct, body = test_direct_with_cookies()
-    results["direct_cookies"] = {
-        "home_status": home_status, "api_status": api_status,
-        "has_token": has_token, "content_type": ct,
-        "is_json": "json" in str(ct).lower(),
-        "items": parse_items(body) if "json" in str(ct).lower() else [],
-        "raw_preview": body[:300],
-    }
-    print(f"  Home status: {home_status} | Token: {has_token} | API status: {api_status} | CT: {ct}")
-    if results["direct_cookies"]["items"]:
-        print(f"  ✅ Items parsati: {len(results['direct_cookies']['items'])}")
-    else:
-        print(f"  ❌ Nessun item | Preview: {body[:200]}")
+            if res["item_count"] > 0:
+                icon = "OK"
+            elif res["status"] == 200:
+                icon = "200-no-items"
+            else:
+                icon = "FAIL"
 
-    # Riepilogo
+            print(f"  [{icon}] {label} -> status={res['status']} json={res['is_json']} items={res['item_count']}")
+
+            if res["item_count"] > 0 and results["winner"] is None:
+                results["winner"] = res
+                print(f"\n  WINNER: {label}")
+                print(f"  Primo item: {json.dumps(res['items_preview'][0], ensure_ascii=False, indent=2)}")
+
+            time.sleep(0.5)
+
     print("\n" + "=" * 60)
-    print("RIEPILOGO")
-    print("=" * 60)
-    for approach, res in results.items():
-        status = res.get("api_status") or res.get("status")
-        ok = bool(res.get("items"))
-        print(f"  {'✅' if ok else '❌'} {approach}: status={status}, json={res['is_json']}, items={len(res.get('items', []))}")
+    if results["winner"]:
+        w = results["winner"]
+        print(f"Endpoint funzionante: {w['endpoint']}")
+        print(f"catalog_id: {w['catalog_id']}")
+        print(f"Items trovati: {w['item_count']}")
+    else:
+        print("Nessun endpoint ha restituito items.")
+        print("Suggerimento: apri DevTools su vinted.it/catalog,")
+        print("filtra Network per 'catalog/items', copia l'URL esatto.")
 
     return results
 
 
 if __name__ == "__main__":
-    import warnings
-    warnings.filterwarnings("ignore")  # sopprime warning SSL
     run_tests()
