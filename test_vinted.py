@@ -1,12 +1,12 @@
 """
-test_vinted.py v3 — Scopre endpoint, catalog_id e struttura raw item Vinted.
-Aggiungere a main.py come:
+test_vinted.py v3 — Scopre struttura raw item Vinted.
+Aggiungere a main.py:
     from test_vinted import run_tests
     @app.get("/test-vinted")
     async def _(): return run_tests()
+Chiamare GET /test-vinted e leggere la response JSON nel browser.
 """
 
-import json
 import time
 import requests
 
@@ -33,72 +33,33 @@ HEADERS_API = {
     "X-Requested-With": "XMLHttpRequest",
 }
 
-CATALOG_IDS = [None, 3848, 2994]
 
-
-def get_session():
+def run_tests():
+    # Auth
     session = requests.Session()
     session.headers.update(HEADERS_HOME)
-    r = session.get(VINTED_HOME, timeout=15)
-    has_token = "access_token_web" in session.cookies
-    print(f"[AUTH] home={r.status_code} | token={has_token} | cookies={list(session.cookies.keys())}")
+    r_home = session.get(VINTED_HOME, timeout=15)
     session.headers.update(HEADERS_API)
-    return session, has_token
 
-
-def fetch_raw(session, catalog_id, search_text="canon"):
+    # Fetch 3 item con keyword "canon", nessun filtro categoria
     params = {
         "page": 1,
-        "per_page": 5,
-        "search_text": search_text,
+        "per_page": 3,
+        "search_text": "canon",
         "order": "newest_first",
         "time": int(time.time()),
     }
-    if catalog_id is not None:
-        params["catalog_ids"] = catalog_id
-
     r = session.get(VINTED_API, params=params, timeout=20)
-    ct = r.headers.get("Content-Type", "")
-    is_json = "json" in ct and r.text.strip().startswith("{")
+    data = r.json() if "json" in r.headers.get("Content-Type", "") else {}
+    items = data.get("items", [])
 
-    if not is_json:
-        return r.status_code, []
-
-    data = r.json()
-    return r.status_code, data.get("items", [])
-
-
-def run_tests():
-    print("=" * 60)
-    print("TEST VINTED v3 — raw item structure discovery")
-    print("=" * 60)
-
-    session, has_token = get_session()
-    time.sleep(1)
-
-    raw_item_printed = False
-
-    for catalog_id in CATALOG_IDS:
-        label = f"catalog_id={catalog_id}"
-        status, items = fetch_raw(session, catalog_id)
-        print(f"\n[{label}] status={status} items={len(items)}")
-
-        if items and not raw_item_printed:
-            print(f"\n{'='*60}")
-            print(f"RAW PRIMO ITEM (catalog_id={catalog_id}):")
-            print(json.dumps(items[0], indent=2, ensure_ascii=False))
-            print(f"{'='*60}")
-            raw_item_printed = True
-
-            # Stampa anche le chiavi di user{} se presente
-            user = items[0].get("user")
-            if isinstance(user, dict):
-                print(f"\nCHIAVI user{{}}: {list(user.keys())}")
-
-        time.sleep(1)
-
-    return {"done": True, "check_logs": "Leggi i log Railway per il raw item"}
-
-
-if __name__ == "__main__":
-    run_tests()
+    return {
+        "auth": {
+            "home_status": r_home.status_code,
+            "has_token": "access_token_web" in session.cookies,
+        },
+        "api_status": r.status_code,
+        "item_count": len(items),
+        # Raw completo dei primi 3 item — tutto nella response JSON
+        "raw_items": items,
+    }
