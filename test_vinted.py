@@ -78,6 +78,10 @@ def try_endpoint(session, endpoint, catalog_id, search_text="canon"):
         if is_json:
             data = r.json()
             raw_items = data.get("items", [])
+            if raw_items:
+              import json
+              print("RAW PRIMO ITEM:")
+              print(json.dumps(raw_items[0], indent=2, ensure_ascii=False))
             for it in raw_items[:3]:
                 items.append({
                     "id": it.get("id"),
