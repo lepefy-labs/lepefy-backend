@@ -5,20 +5,23 @@ Stesso ruolo di scanner.py ma per Vinted.it.
 Si appoggia alla stessa tabella scan_results (url UNIQUE → dedup automatico).
 
 Endpoint confermato: GET /api/v2/catalog/items
+User API:           GET /api/v2/users/{id}  (paese + città)
 Auth: cookie session (access_token_web) ottenuto visitando la home.
 Nessun ScraperAPI necessario — l'IP di Railway passa Datadome direttamente.
 
 Differenze rispetto a scanner.py:
-- Fetch via requests.Session con cookie (no ScraperAPI)
 - price è un oggetto {"amount": "550.0", "currency_code": "EUR"}
 - total_item_price = prezzo reale per l'acquirente (price + fee ~5%+€0.70)
-- Filtro lingua: scarta listing con titoli chiaramente non italiani
+- location = "{city}, {country_title}" estratta da /api/v2/users/{id}
+- country = country_code ISO (es. "IT", "ES", "FR") — colonna nuova in scan_results
 - source = 'Vinted.it'
-- Nessun campo body (Vinted non lo espone nella search API)
+- Nessun campo body (non esposto dalla search API)
+
+Prerequisito DB:
+    ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS country text DEFAULT NULL;
 """
 
 import os
-import re
 import time
 import asyncio
 import requests
@@ -27,29 +30,17 @@ from supabase import create_client, Client
 SUPABASE_URL         = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
-VINTED_HOME = "https://www.vinted.it"
-VINTED_API  = f"{VINTED_HOME}/api/v2/catalog/items"
+VINTED_HOME        = "https://www.vinted.it"
+VINTED_SEARCH_API  = f"{VINTED_HOME}/api/v2/catalog/items"
+VINTED_USER_API    = f"{VINTED_HOME}/api/v2/users"
 
-# Catalog IDs vinted.it — filtro categoria per ridurre rumore
 CATALOG_FOTOGRAFIA  = 3848
 CATALOG_ELETTRONICA = 2994
-
-# Parole frequenti in francese/portoghese/spagnolo/tedesco.
-# Vinted.it è cross-border: listing europei appaiono sul dominio .it.
-# Se il titolo contiene > 2 di questi indicatori, lo scartiamo.
-_NON_IT_RE = re.compile(
-    r"\b(le|la|les|un|une|des|du|pour|avec|dans|très|neuf|taille|vendu"
-    r"|novo|nova|para|com|sem|usado"
-    r"|nuevo|nueva|con|sin|usado|usada|talla|vendo"
-    r"|neu|für|mit|aus|sehr|guter|gute)\b",
-    re.IGNORECASE,
-)
 
 HEADERS_HOME = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/131.0.0.0 Safari/537.36"
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "it-IT,it;q=0.9",
@@ -58,8 +49,7 @@ HEADERS_HOME = {
 HEADERS_API = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/131.0.0.0 Safari/537.36"
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     ),
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "it-IT,it;q=0.9",
@@ -82,9 +72,8 @@ def _get_supabase() -> Client:
 
 def _get_vinted_session() -> requests.Session:
     """
-    Visita la home di Vinted per ottenere access_token_web dai cookie.
-    Il token è un JWT valido ~2h — sufficiente per un singolo ciclo di scan.
-    Solleva RuntimeError se la home non risponde 200.
+    Visita la home per ottenere access_token_web dai cookie.
+    JWT valido ~2h — sufficiente per un ciclo di scan completo.
     """
     session = requests.Session()
     session.headers.update(HEADERS_HOME)
@@ -96,13 +85,13 @@ def _get_vinted_session() -> requests.Session:
 
 
 # ──────────────────────────────────────────────
-# Parsing
+# Parsing prezzi
 # ──────────────────────────────────────────────
 
 def _parse_price(price_obj) -> tuple[str, float | None]:
     """
-    Vinted restituisce price come {"amount": "550.0", "currency_code": "EUR"}.
-    Ritorna (price_raw: str, price_value: float | None).
+    Vinted price: {"amount": "550.0", "currency_code": "EUR"}
+    Ritorna (price_raw, price_value).
     """
     if isinstance(price_obj, dict):
         try:
@@ -110,22 +99,66 @@ def _parse_price(price_obj) -> tuple[str, float | None]:
             currency = price_obj.get("currency_code", "EUR")
             return f"{amount:.2f} {currency}", amount
         except (ValueError, TypeError):
-            return "N/D", None
+            pass
     return "N/D", None
 
 
-def _is_likely_italian(title: str) -> bool:
-    """
-    Filtra listing con titoli chiaramente non italiani.
-    Se > 2 indicatori di lingue straniere → scarta.
-    """
-    if not title:
-        return True
-    return len(_NON_IT_RE.findall(title)) <= 2
+# ──────────────────────────────────────────────
+# User API — paese e città
+# ──────────────────────────────────────────────
 
+def _fetch_user_details(session: requests.Session, user_ids: list[int]) -> dict[int, dict]:
+    """
+    Chiama /api/v2/users/{id} per ogni user_id univoco.
+    Ritorna mapping user_id → {country_code, location}.
+
+    Chiamata solo per gli item che hanno già passato i filtri
+    (keyword nel titolo + price_value presente) — riduce al minimo le call.
+
+    Campi estratti dalla user API (verificati sul raw):
+        user.country_code       → "IT", "ES", "FR" ...
+        user.country_title      → "Italia", "Spagna" ... (in italiano)
+        user.city               → "Milano", "Sant Antoni de Portmany" ...
+        user.expose_location    → bool (se False la città potrebbe mancare)
+    """
+    result = {}
+    for uid in user_ids:
+        try:
+            r = session.get(f"{VINTED_USER_API}/{uid}", timeout=15)
+            if r.status_code != 200:
+                result[uid] = {"country_code": None, "location": ""}
+                continue
+
+            user = r.json().get("user", {})
+            country_code  = user.get("country_code") or user.get("country_iso_code")
+            country_title = user.get("country_title", "")
+            city          = user.get("city", "") if user.get("expose_location") else ""
+
+            if city and country_title:
+                location = f"{city}, {country_title}"
+            elif country_title:
+                location = country_title
+            else:
+                location = ""
+
+            result[uid] = {
+                "country_code": country_code,  # es. "IT", "ES"
+                "location": location,           # es. "Milano, Italia"
+            }
+        except Exception:
+            result[uid] = {"country_code": None, "location": ""}
+
+        time.sleep(0.3)  # gentile verso Vinted
+
+    return result
+
+
+# ──────────────────────────────────────────────
+# Filtri
+# ──────────────────────────────────────────────
 
 def _keyword_in_title(keyword: str, title: str) -> bool:
-    """Tutti i token della keyword devono apparire nel titolo (case-insensitive)."""
+    """Tutti i token della keyword devono apparire nel titolo."""
     if not title:
         return False
     title_lower = title.lower()
@@ -133,23 +166,24 @@ def _keyword_in_title(keyword: str, title: str) -> bool:
 
 
 def _catalog_id_for_keyword(keyword: str) -> int | None:
-    """Sceglie il catalog_id Vinted in base alla keyword (euristica)."""
-    foto_hints = {"canon", "nikon", "leica", "olympus", "obiettivo", "fotocamera", "tamron", "fujifilm", "lumix"}
-    tech_hints = {"iphone", "thinkpad", "samsung", "macbook", "ipad", "console", "playstation", "nintendo"}
-    kw_lower = keyword.lower()
-    if any(h in kw_lower for h in foto_hints):
+    """Catalog_id Vinted in base alla keyword."""
+    foto_hints = {"canon", "nikon", "leica", "olympus", "obiettivo",
+                  "fotocamera", "tamron", "fujifilm", "lumix"}
+    tech_hints = {"iphone", "thinkpad", "samsung", "macbook",
+                  "ipad", "console", "playstation", "nintendo"}
+    kw = keyword.lower()
+    if any(h in kw for h in foto_hints):
         return CATALOG_FOTOGRAFIA
-    if any(h in kw_lower for h in tech_hints):
+    if any(h in kw for h in tech_hints):
         return CATALOG_ELETTRONICA
-    return None  # nessun filtro categoria → solo search_text
+    return None
 
 
 # ──────────────────────────────────────────────
-# Fetch Vinted
+# Fetch Vinted search
 # ──────────────────────────────────────────────
 
 def _fetch_vinted(session: requests.Session, keyword: str, per_page: int = 96) -> list[dict]:
-    """Fetch prima pagina di risultati dall'API Vinted per una keyword."""
     params = {
         "page": 1,
         "per_page": per_page,
@@ -161,27 +195,23 @@ def _fetch_vinted(session: requests.Session, keyword: str, per_page: int = 96) -
     if catalog_id is not None:
         params["catalog_ids"] = catalog_id
 
-    r = session.get(VINTED_API, params=params, timeout=20)
+    r = session.get(VINTED_SEARCH_API, params=params, timeout=20)
     if r.status_code != 200:
-        raise ValueError(f"Vinted API returned {r.status_code} per keyword='{keyword}'")
-
-    data = r.json()
-    return data.get("items", [])
+        raise ValueError(f"Vinted search API returned {r.status_code}")
+    return r.json().get("items", [])
 
 
 # ──────────────────────────────────────────────
-# Scan & Save per keyword
+# Scan per keyword
 # ──────────────────────────────────────────────
 
 def _scan_vinted_keyword(session: requests.Session, keyword: str) -> dict:
     """
-    Fetch Vinted + pre-filtro keyword/lingua + salvataggio annunci grezzi.
-    scored=false per tutti i nuovi annunci — lo scorer esistente li prenderà
-    al prossimo ciclo indipendentemente da source.
+    Fetch Vinted + filtri + arricchimento con user API + salvataggio.
     """
     supabase = _get_supabase()
 
-    # Fetch
+    # Fetch annunci
     try:
         raw_items = _fetch_vinted(session, keyword)
     except Exception as e:
@@ -192,7 +222,7 @@ def _scan_vinted_keyword(session: requests.Session, keyword: str) -> dict:
         return {"keyword": keyword, "found": 0, "new": 0,
                 "updated": 0, "skipped": 0, "rejected": 0}
 
-    # URL già in DB per questa keyword (source=Vinted.it)
+    # URL già in DB per questa keyword
     existing_response = (
         supabase.table("scan_results")
         .select("url, price_value")
@@ -202,10 +232,10 @@ def _scan_vinted_keyword(session: requests.Session, keyword: str) -> dict:
     )
     existing = {row["url"]: row["price_value"] for row in (existing_response.data or [])}
 
-    new_rows = []
-    skipped  = 0
+    # ── Pre-filtro: keyword nel titolo + price_value presente ──
+    # Fatto PRIMA delle user API call per minimizzare le chiamate
+    candidates = []
     rejected = 0
-    updated  = 0
 
     for item in raw_items:
         url   = item.get("url", "")
@@ -213,33 +243,46 @@ def _scan_vinted_keyword(session: requests.Session, keyword: str) -> dict:
 
         if not url:
             continue
-
-        # Pre-filtro 1: keyword nel titolo
         if not _keyword_in_title(keyword, title):
             rejected += 1
             continue
-
-        # Pre-filtro 2: lingua (scarta listing non italiani)
-        if not _is_likely_italian(title):
-            rejected += 1
+        _, price_value = _parse_price(item.get("price"))
+        if not price_value:
             continue
 
-        # Parsing prezzi
+        candidates.append(item)
+
+    # ── Fetch user details solo per i candidati (user_id univoci) ──
+    user_ids = list({
+        item["user"]["id"]
+        for item in candidates
+        if isinstance(item.get("user"), dict) and item["user"].get("id")
+    })
+    user_details = _fetch_user_details(session, user_ids) if user_ids else {}
+
+    # ── Salvataggio ──
+    new_rows = []
+    skipped  = 0
+    updated  = 0
+
+    for item in candidates:
+        url   = item.get("url", "")
+        title = item.get("title", "")
+
         price_raw, price_value = _parse_price(item.get("price"))
         _, total_price = _parse_price(item.get("total_item_price"))
         _, service_fee = _parse_price(item.get("service_fee"))
 
-        if not price_value:
-            continue
-
-        # Price_raw esteso: include il costo reale per l'acquirente
-        # Lo scorer leggerà source='Vinted.it' e userà total_price per il margine
-        price_raw_full = f"{price_raw} (acquirente: {total_price:.2f} EUR, fee: {service_fee:.2f} EUR)" \
+        price_raw_full = (
+            f"{price_raw} (acquirente: {total_price:.2f} EUR, fee: {service_fee:.2f} EUR)"
             if total_price and service_fee else price_raw
+        )
 
-        # Location: Vinted espone city dentro l'oggetto user
-        user_obj = item.get("user", {})
-        location = user_obj.get("city", "") if isinstance(user_obj, dict) else ""
+        # Location e country da user API
+        uid         = item.get("user", {}).get("id") if isinstance(item.get("user"), dict) else None
+        user_info   = user_details.get(uid, {}) if uid else {}
+        location    = user_info.get("location", "")
+        country     = user_info.get("country_code")  # "IT", "ES", "FR" ...
 
         condition = item.get("status", "non specificata") or "non specificata"
 
@@ -250,17 +293,18 @@ def _scan_vinted_keyword(session: requests.Session, keyword: str) -> dict:
                 skipped += 1
                 continue
             if old_price and (old_price - price_value) / old_price >= 0.15:
-                # Calo >= 15%: reset scored per re-scoring e notifica
+                # Calo >= 15%: reset scored + notifiche
                 supabase.table("scan_results").update({
                     "price_raw": price_raw_full,
                     "price_value": price_value,
+                    "location": location,
+                    "country": country,
                     "scored": False,
                     "score": None,
                     "margine_stimato": None,
                     "motivazione": None,
                     "rischi": None,
                 }).eq("url", url).execute()
-                # Reset notifications_log
                 scan_ids = (
                     supabase.table("scan_results")
                     .select("id")
@@ -273,7 +317,6 @@ def _scan_vinted_keyword(session: requests.Session, keyword: str) -> dict:
                     ).execute()
                 updated += 1
             else:
-                # Variazione < 15%: aggiorna solo prezzo
                 supabase.table("scan_results").update({
                     "price_raw": price_raw_full,
                     "price_value": price_value,
@@ -288,8 +331,9 @@ def _scan_vinted_keyword(session: requests.Session, keyword: str) -> dict:
             "price_raw":  price_raw_full,
             "price_value": price_value,
             "location":   location,
+            "country":    country,
             "url":        url,
-            "date_listed": None,  # Vinted API non espone data listing
+            "date_listed": None,
             "source":     "Vinted.it",
             "scored":     False,
             "condition":  condition,
@@ -301,17 +345,18 @@ def _scan_vinted_keyword(session: requests.Session, keyword: str) -> dict:
         ).execute()
 
     return {
-        "keyword": keyword,
+        "keyword":  keyword,
         "found":    len(raw_items),
         "new":      len(new_rows),
         "updated":  updated,
         "skipped":  skipped,
         "rejected": rejected,
+        "user_api_calls": len(user_ids),
     }
 
 
 # ──────────────────────────────────────────────
-# Entry point (async, pattern identico a scanner.py)
+# Entry point
 # ──────────────────────────────────────────────
 
 async def run_vinted_scan() -> dict:
@@ -320,7 +365,6 @@ async def run_vinted_scan() -> dict:
     Pattern identico a run_scan_and_save() in scanner.py.
     """
     try:
-        # Session Vinted: una sola per tutto il ciclo (token valido ~2h)
         session = await asyncio.to_thread(_get_vinted_session)
     except Exception as e:
         return {"status": "error", "detail": f"Vinted session failed: {e}"}
@@ -343,16 +387,15 @@ async def run_vinted_scan() -> dict:
     results = []
     for i, keyword in enumerate(keywords):
         if i > 0:
-            await asyncio.sleep(3)  # pausa gentile tra keyword
+            await asyncio.sleep(3)
         result = await asyncio.to_thread(_scan_vinted_keyword, session, keyword)
         results.append(result)
-
-    total_new = sum(r.get("new", 0) for r in results)
 
     return {
         "status": "ok",
         "source": "Vinted.it",
         "keywords_scanned": len(keywords),
-        "total_new": total_new,
+        "total_new": sum(r.get("new", 0) for r in results),
+        "total_user_api_calls": sum(r.get("user_api_calls", 0) for r in results),
         "results": results,
     }
