@@ -275,6 +275,7 @@ def _run_score_job() -> dict:
             "rischi": ai.get("rischi"),
             "ebay_valore_mercato": ebay_value,
             "sconto_consigliato": ai.get("sconto_consigliato"),
+            "verdict": ai.get("verdict"),
         }).eq("id", ad_id).execute()
         scored += 1
 
