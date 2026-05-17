@@ -11,6 +11,7 @@ from app.scraper.market_analytics import (
     get_price_trend,
     get_active_listings,
 )
+from app.scraper.vinted_scanner import run_vinted_scan
 
 app = FastAPI(title="Lepefy Backend API")
 
@@ -48,6 +49,15 @@ async def cron_scan(secret: str = ""):
         return {"error": "unauthorized"}
     return await run_scan_and_save()
 
+@app.get("/cron/vinted-scan")
+async def cron_vinted_scan(secret: str = ""):
+    """
+    Fetch Vinted.it per ogni keyword attiva e salva annunci grezzi (scored=false).
+    Lo scorer esistente li raccoglierà al ciclo successivo senza modifiche.
+    """
+    if secret != os.getenv("CRON_SECRET"):
+        return {"error": "unauthorized"}
+    return await run_vinted_scan()
 
 @app.get("/cron/score")
 async def cron_score(secret: str = ""):
