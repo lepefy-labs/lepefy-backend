@@ -162,6 +162,12 @@ async def ebay_account_deletion(request: Request):
 # Debug (da rimuovere in produzione)
 # ---------------------------------------------------------------------------
 
+from test_vinted import run_tests
+
+@app.get("/test-vinted")
+async def test_vinted_endpoint():
+    return run_tests()
+
 @app.get("/debug/scraperapi")
 async def debug_scraperapi():
     import httpx
