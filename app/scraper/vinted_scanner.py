@@ -15,6 +15,12 @@ Differenze rispetto a scanner.py:
 - location = "{city}, {country_title}" estratta da /api/v2/users/{id}
 - country = country_code ISO (es. "IT", "ES", "FR") — colonna nuova in scan_results
 - source = 'Vinted.it'
+- image_url = URL foto principale (colonna nuova in scan_results)
+- Nessun campo body (non esposto dalla search API)
+
+Prerequisiti DB:
+    ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS country text DEFAULT NULL;
+    ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS image_url text DEFAULT NULL;
 - Nessun campo body (non esposto dalla search API)
 
 Prerequisito DB:
@@ -33,6 +39,7 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 VINTED_HOME        = "https://www.vinted.it"
 VINTED_SEARCH_API  = f"{VINTED_HOME}/api/v2/catalog/items"
 VINTED_USER_API    = f"{VINTED_HOME}/api/v2/users"
+VINTED_ITEM_API    = f"{VINTED_HOME}/api/v2/items"
 
 CATALOG_FOTOGRAFIA  = 3848
 CATALOG_ELETTRONICA = 2994
@@ -154,6 +161,33 @@ def _fetch_user_details(session: requests.Session, user_ids: list[int]) -> dict[
 
 
 # ──────────────────────────────────────────────
+# Item API — descrizione annuncio
+# ──────────────────────────────────────────────
+
+def _fetch_item_descriptions(session: requests.Session, item_ids: list[int]) -> dict[int, str]:
+    """
+    Chiama /api/v2/items/{id} per ogni item_id.
+    Ritorna mapping item_id → description (str).
+
+    Chiamata SOLO per i nuovi annunci (non già in DB) per minimizzare
+    le API call nei cicli successivi al primo.
+    """
+    result = {}
+    for iid in item_ids:
+        try:
+            r = session.get(f"{VINTED_ITEM_API}/{iid}", timeout=15)
+            if r.status_code == 200:
+                item = r.json().get("item", {})
+                result[iid] = item.get("description", "") or ""
+            else:
+                result[iid] = ""
+        except Exception:
+            result[iid] = ""
+        time.sleep(0.3)
+    return result
+
+
+# ──────────────────────────────────────────────
 # Filtri
 # ──────────────────────────────────────────────
 
@@ -252,7 +286,11 @@ def _scan_vinted_keyword(session: requests.Session, keyword: str) -> dict:
 
         candidates.append(item)
 
-    # ── Fetch user details solo per i candidati (user_id univoci) ──
+    # ── Separa candidati: nuovi vs già in DB ──
+    truly_new  = [c for c in candidates if c.get("url", "") not in existing]
+    in_db      = [c for c in candidates if c.get("url", "") in existing]
+
+    # ── Fetch user details (user_id univoci, solo sui candidati) ──
     user_ids = list({
         item["user"]["id"]
         for item in candidates
@@ -260,12 +298,19 @@ def _scan_vinted_keyword(session: requests.Session, keyword: str) -> dict:
     })
     user_details = _fetch_user_details(session, user_ids) if user_ids else {}
 
+    # ── Fetch descrizioni (solo per i nuovi, un call per item) ──
+    new_item_ids = [
+        item["id"] for item in truly_new if item.get("id")
+    ]
+    item_descriptions = _fetch_item_descriptions(session, new_item_ids) if new_item_ids else {}
+
     # ── Salvataggio ──
     new_rows = []
     skipped  = 0
     updated  = 0
 
-    for item in candidates:
+    # ── Price drop check per annunci già in DB ──
+    for item in in_db:
         url   = item.get("url", "")
         title = item.get("title", "")
 
@@ -274,57 +319,71 @@ def _scan_vinted_keyword(session: requests.Session, keyword: str) -> dict:
         _, service_fee = _parse_price(item.get("service_fee"))
 
         price_raw_full = (
-            f"{price_raw} (acquirente: {total_price:.2f} EUR, fee: {service_fee:.2f} EUR)"
+            f"{total_price:.2f} EUR (prodotto: {price_value:.2f} EUR + fee: {service_fee:.2f} EUR)"
             if total_price and service_fee else price_raw
         )
 
-        # Location e country da user API
-        uid         = item.get("user", {}).get("id") if isinstance(item.get("user"), dict) else None
-        user_info   = user_details.get(uid, {}) if uid else {}
-        location    = user_info.get("location", "")
-        country     = user_info.get("country_code")  # "IT", "ES", "FR" ...
+        uid       = item.get("user", {}).get("id") if isinstance(item.get("user"), dict) else None
+        user_info = user_details.get(uid, {}) if uid else {}
+        location  = user_info.get("location", "")
+        country   = user_info.get("country_code")
 
-        condition = item.get("status", "non specificata") or "non specificata"
-
-        # Gestione duplicati
-        if url in existing:
-            old_price = existing[url]
-            if old_price == price_value:
-                skipped += 1
-                continue
-            if old_price and (old_price - price_value) / old_price >= 0.15:
-                # Calo >= 15%: reset scored + notifiche
-                supabase.table("scan_results").update({
-                    "price_raw": price_raw_full,
-                    "price_value": price_value,
-                    "location": location,
-                    "country": country,
-                    "scored": False,
-                    "score": None,
-                    "margine_stimato": None,
-                    "motivazione": None,
-                    "rischi": None,
-                }).eq("url", url).execute()
-                scan_ids = (
-                    supabase.table("scan_results")
-                    .select("id")
-                    .eq("url", url)
-                    .execute()
-                )
-                if scan_ids.data:
-                    supabase.table("notifications_log").delete().eq(
-                        "scan_result_id", scan_ids.data[0]["id"]
-                    ).execute()
-                updated += 1
-            else:
-                supabase.table("scan_results").update({
-                    "price_raw": price_raw_full,
-                    "price_value": price_value,
-                }).eq("url", url).execute()
-                skipped += 1
+        old_price = existing[url]
+        if old_price == price_value:
+            skipped += 1
             continue
+        if old_price and (old_price - price_value) / old_price >= 0.15:
+            supabase.table("scan_results").update({
+                "price_raw": price_raw_full,
+                "price_value": price_value,
+                "location": location,
+                "country": country,
+                "scored": False,
+                "score": None,
+                "margine_stimato": None,
+                "motivazione": None,
+                "rischi": None,
+                "image_url": item.get("photo", {}).get("url") or None,
+            }).eq("url", url).execute()
+            scan_ids = (
+                supabase.table("scan_results")
+                .select("id")
+                .eq("url", url)
+                .execute()
+            )
+            if scan_ids.data:
+                supabase.table("notifications_log").delete().eq(
+                    "scan_result_id", scan_ids.data[0]["id"]
+                ).execute()
+            updated += 1
+        else:
+            supabase.table("scan_results").update({
+                "price_raw": price_raw_full,
+                "price_value": price_value,
+            }).eq("url", url).execute()
+            skipped += 1
 
-        # Nuovo annuncio
+    # ── Nuovi annunci ──
+    for item in truly_new:
+        url   = item.get("url", "")
+        title = item.get("title", "")
+
+        price_raw, price_value = _parse_price(item.get("price"))
+        _, total_price = _parse_price(item.get("total_item_price"))
+        _, service_fee = _parse_price(item.get("service_fee"))
+
+        price_raw_full = (
+            f"{total_price:.2f} EUR (prodotto: {price_value:.2f} EUR + fee: {service_fee:.2f} EUR)"
+            if total_price and service_fee else price_raw
+        )
+
+        uid       = item.get("user", {}).get("id") if isinstance(item.get("user"), dict) else None
+        user_info = user_details.get(uid, {}) if uid else {}
+        location  = user_info.get("location", "")
+        country   = user_info.get("country_code")
+        condition = item.get("status", "non specificata") or "non specificata"
+        body      = item_descriptions.get(item.get("id"), "") or ""
+
         new_rows.append({
             "keyword":    keyword,
             "title":      title,
@@ -337,6 +396,8 @@ def _scan_vinted_keyword(session: requests.Session, keyword: str) -> dict:
             "source":     "Vinted.it",
             "scored":     False,
             "condition":  condition,
+            "image_url":  item.get("photo", {}).get("url") or None,
+            "body":       body,
         })
 
     if new_rows:
@@ -352,6 +413,7 @@ def _scan_vinted_keyword(session: requests.Session, keyword: str) -> dict:
         "skipped":  skipped,
         "rejected": rejected,
         "user_api_calls": len(user_ids),
+        "item_api_calls": len(new_item_ids),
     }
 
 
@@ -397,5 +459,6 @@ async def run_vinted_scan() -> dict:
         "keywords_scanned": len(keywords),
         "total_new": sum(r.get("new", 0) for r in results),
         "total_user_api_calls": sum(r.get("user_api_calls", 0) for r in results),
+        "total_item_api_calls": sum(r.get("item_api_calls", 0) for r in results),
         "results": results,
     }
