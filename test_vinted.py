@@ -1,10 +1,9 @@
 """
-test_vinted.py v3 — Scopre struttura raw item Vinted.
+test_vinted.py v4 — Verifica struttura /api/v2/users/{user_id}
 Aggiungere a main.py:
     from test_vinted import run_tests
     @app.get("/test-vinted")
     async def _(): return run_tests()
-Chiamare GET /test-vinted e leggere la response JSON nel browser.
 """
 
 import time
@@ -12,6 +11,7 @@ import requests
 
 VINTED_HOME = "https://www.vinted.it"
 VINTED_API  = f"{VINTED_HOME}/api/v2/catalog/items"
+VINTED_USER = f"{VINTED_HOME}/api/v2/users"
 
 HEADERS_HOME = {
     "User-Agent": (
@@ -41,7 +41,7 @@ def run_tests():
     r_home = session.get(VINTED_HOME, timeout=15)
     session.headers.update(HEADERS_API)
 
-    # Fetch 3 item con keyword "canon", nessun filtro categoria
+    # Step 1: fetch 3 item per ricavare user_id reali
     params = {
         "page": 1,
         "per_page": 3,
@@ -49,17 +49,34 @@ def run_tests():
         "order": "newest_first",
         "time": int(time.time()),
     }
-    r = session.get(VINTED_API, params=params, timeout=20)
-    data = r.json() if "json" in r.headers.get("Content-Type", "") else {}
-    items = data.get("items", [])
+    r_search = session.get(VINTED_API, params=params, timeout=20)
+    items = r_search.json().get("items", []) if r_search.status_code == 200 else []
+
+    # Raccogli user_id univoci dai risultati
+    user_ids = list({
+        item["user"]["id"]
+        for item in items
+        if isinstance(item.get("user"), dict) and item["user"].get("id")
+    })
+
+    # Step 2: chiama /api/v2/users/{id} per i primi 2 user_id trovati
+    user_responses = {}
+    for uid in user_ids[:2]:
+        time.sleep(0.5)
+        r_user = session.get(f"{VINTED_USER}/{uid}", timeout=15)
+        user_responses[str(uid)] = {
+            "status": r_user.status_code,
+            # Raw completo nella response — leggi nel browser
+            "raw": r_user.json() if r_user.status_code == 200 else r_user.text[:300],
+        }
 
     return {
         "auth": {
             "home_status": r_home.status_code,
             "has_token": "access_token_web" in session.cookies,
         },
-        "api_status": r.status_code,
-        "item_count": len(items),
-        # Raw completo dei primi 3 item — tutto nella response JSON
-        "raw_items": items,
+        "search_status": r_search.status_code,
+        "user_ids_found": user_ids,
+        # Raw completo delle risposte user — contiene paese e città se disponibili
+        "user_api_responses": user_responses,
     }
