@@ -15,79 +15,82 @@ def _get_supabase() -> Client:
 
 
 def _build_email_html(deals: list[dict]) -> str:
-    rows = ""
+    cards = ""
     for d in deals:
         score = d.get("score")
         margine = d.get("margine_stimato")
         motivazione = d.get("motivazione") or ""
         rischi = d.get("rischi") or ""
+        sconto = d.get("sconto_consigliato")
 
-        score_html = f'<strong>{score}/10</strong>' if score else "N/D"
-        margine_html = f'<strong style="color:#16a34a;">+€{margine}</strong>' if margine else "N/D"
-        rischi_html = (
-            f'<div style="margin-top:4px;font-size:11px;color:#dc2626;">⚠ {rischi}</div>'
-            if rischi else ""
-        )
+        score_html = f"{score}/10" if score else "N/D"
+        margine_html = f"+€{margine}" if margine else "N/D"
+        margine_color = "#16a34a" if margine else "#9ca3af"
 
-        rows += f"""
-        <tr>
-          <td style="padding:12px 8px;border-bottom:1px solid #f0f0f0;vertical-align:top;">
-            <a href="{d['url']}" style="color:#1a1a1a;font-weight:600;text-decoration:none;font-size:13px;">
-              {d['title']}
-            </a>
-            <div style="margin-top:4px;font-size:11px;color:#888;">
-              {d.get('location','')} · {str(d.get('date_listed',''))[:10]}
+        sconto_html = ""
+        if sconto and margine:
+            nuovo_margine = int((margine or 0) + sconto)
+            sconto_html = f'''
+            <div style="margin-top:8px;padding:8px 10px;background:#eff6ff;border-radius:4px;font-size:13px;color:#1d4ed8;">
+              💬 Tratta: -€{sconto} → margine €{nuovo_margine}
+            </div>'''
+
+        rischi_html = ""
+        if rischi:
+            rischi_html = f'''
+            <div style="margin-top:6px;font-size:12px;color:#dc2626;">⚠️ {rischi}</div>'''
+
+        cards += f'''
+        <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;padding:16px;margin-bottom:12px;">
+          <div style="font-size:15px;font-weight:700;color:#1a1a1a;margin-bottom:4px;">
+            {d["title"]}
+          </div>
+          <div style="font-size:12px;color:#9ca3af;margin-bottom:12px;">
+            {d.get("location","")} · {str(d.get("date_listed",""))[:10]}
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <div>
+              <div style="font-size:22px;font-weight:800;color:#1a1a1a;">{d.get("price_raw","N/D")}</div>
+              <div style="font-size:13px;color:{margine_color};font-weight:600;">Margine: {margine_html}</div>
+              <div style="font-size:12px;color:#6b7280;">Score: {score_html}</div>
             </div>
-            {f'<div style="margin-top:6px;font-size:12px;color:#555;">{motivazione}</div>' if motivazione else ''}
-            {rischi_html}
-          </td>
-          <td style="padding:12px 8px;border-bottom:1px solid #f0f0f0;text-align:right;vertical-align:top;white-space:nowrap;">
-            <div style="font-size:18px;font-weight:700;color:#1a1a1a;">{d.get('price_raw','N/D')}</div>
-            <div style="margin-top:4px;font-size:12px;color:#555;">Margine: {margine_html}</div>
-            <div style="margin-top:4px;font-size:12px;color:#555;">Score: {score_html}</div>
-            {f'<div style="margin-top:4px;font-size:12px;color:#2563eb;">Tratta: -€{d["sconto_consigliato"]} → margine €{int((d["margine_stimato"] or 0) + d["sconto_consigliato"])}</div>' if d.get("sconto_consigliato") else ""}
-            {f'<div style="margin-top:4px;font-size:11px;color:#9ca3af;">eBay: €{d["ebay_valore_mercato"]}</div>' if d.get("ebay_valore_mercato") else ""}
-          </td>
-          <td style="padding:12px 8px;border-bottom:1px solid #f0f0f0;text-align:center;vertical-align:top;">
-            <a href="{d['url']}" style="background:#1a1a1a;color:#fff;padding:6px 14px;border-radius:4px;font-size:12px;text-decoration:none;display:inline-block;">
+            <a href="{d["url"]}" style="display:inline-block;background:#1a1a1a;color:#ffffff;padding:12px 20px;border-radius:6px;font-size:14px;font-weight:600;text-decoration:none;white-space:nowrap;">
               Vedi →
             </a>
-          </td>
-        </tr>"""
+          </div>
+          {f'<div style="font-size:13px;color:#555;margin-top:4px;">{motivazione}</div>' if motivazione else ""}
+          {sconto_html}
+          {rischi_html}
+        </div>'''
 
-    return f"""
-    <!DOCTYPE html>
-    <html>
-    <body style="margin:0;padding:0;background:#f9f9f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
-      <div style="max-width:640px;margin:40px auto;background:#fff;border-radius:8px;overflow:hidden;border:1px solid #e8e8e8;">
-        <div style="background:#1a1a1a;padding:24px 32px;">
-          <img src="https://osonphsavryefwmlhkyv.supabase.co/storage/v1/object/public/assets/lepefy-logo-email.png" alt="Lepefy" height="40" style="display:block;" />
-          <span style="color:#666;font-size:13px;margin-top:8px;display:block;">nuovi affari trovati</span>
-        </div>
-        <div style="padding:24px 32px;">
-          <p style="color:#444;font-size:14px;margin:0 0 20px 0;">
-            Abbiamo trovato <strong>{len(deals)} annunci</strong> nella tua fascia prezzo:
-          </p>
-          <table style="width:100%;border-collapse:collapse;">
-            <thead>
-              <tr style="background:#f5f5f5;">
-                <th style="padding:8px;text-align:left;font-size:12px;color:#888;font-weight:500;">Annuncio</th>
-                <th style="padding:8px;text-align:right;font-size:12px;color:#888;font-weight:500;">Prezzo & AI</th>
-                <th style="padding:8px;font-size:12px;color:#888;font-weight:500;"></th>
-              </tr>
-            </thead>
-            <tbody>{rows}</tbody>
-          </table>
-        </div>
-        <div style="padding:16px 32px;background:#f9f9f9;border-top:1px solid #f0f0f0;">
-          <p style="color:#aaa;font-size:11px;margin:0;">
-            Stai ricevendo questa email perché sei abbonato a Lepefy Premium.<br>
-            <a href="mailto:{EMAIL_FROM}" style="color:#aaa;">Contattaci</a> per disdire.
-          </p>
-        </div>
-      </div>
-    </body>
-    </html>"""
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;background:#f3f4f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+  <div style="max-width:600px;margin:0 auto;padding:16px;">
+    <div style="background:#1a1a1a;border-radius:8px 8px 0 0;padding:20px 24px;margin-bottom:0;">
+      <img src="https://osonphsavryefwmlhkyv.supabase.co/storage/v1/object/public/assets/lepefy-logo-email.png" alt="Lepefy" height="32" style="display:block;" />
+      <div style="color:#9ca3af;font-size:13px;margin-top:6px;">nuovi affari trovati</div>
+    </div>
+    <div style="background:#f9fafb;padding:16px 24px;border-left:1px solid #e5e7eb;border-right:1px solid #e5e7eb;">
+      <p style="color:#374151;font-size:14px;margin:0;">
+        Abbiamo trovato <strong>{len(deals)} annunci</strong> nella tua fascia prezzo:
+      </p>
+    </div>
+    <div style="padding:12px 0;">
+      {cards}
+    </div>
+    <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:0 0 8px 8px;padding:16px 24px;">
+      <p style="color:#9ca3af;font-size:11px;margin:0;">
+        Stai ricevendo questa email perchè sei abbonato a Lepefy Premium.<br>
+        <a href="mailto:{EMAIL_FROM}" style="color:#9ca3af;">Contattaci</a> per disdire.
+      </p>
+    </div>
+  </div>
+</body>
+</html>"""
 
 
 def _send_email(to: str, subject: str, html: str) -> None:
