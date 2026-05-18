@@ -59,6 +59,7 @@ def _score_ad(
     shipping: str,
     condition: str = "non specificata",
     ebay_value: float | None = None,
+    source: str = "Subito.it",
 ) -> tuple[dict, dict]:
     """
     Chiama Claude Haiku per valutare l'annuncio.
@@ -80,6 +81,15 @@ def _score_ad(
     else:
         ebay_anchor = "Nessun dato eBay disponibile — stima il valore di mercato basandoti sulla tua conoscenza del settore."
 
+    if source == "Vinted.it":
+        platform_note = (
+            f"IMPORTANTE — Annuncio da Vinted.it: su Vinted il buyer paga ~5% + €0.70 di protezione acquirenti. "
+            f"Il costo reale per il flipper e: prezzo_listato x 1.05 + 0.70. "
+            f"Usa questo costo reale (non il prezzo listato) per calcolare il margine_stimato."
+        )
+    else:
+        platform_note = "Annuncio da Subito.it: nessuna commissione per il venditore."
+
     prompt = f"""Sei un esperto di elettronica usata e flipping su marketplace italiani (Subito.it).
 
 Keyword cercata: "{keyword}"
@@ -90,6 +100,7 @@ Prezzo richiesto: {price}
 Città: {location}
 Condizione dichiarata: {condition}
 {shipping_info}
+{platform_note}
 {ebay_anchor}
 Descrizione: {body[:800] if body else 'N/D'}
 
@@ -230,7 +241,8 @@ def _run_score_job() -> dict:
         # Scoring AI
         ebay_value = None  # riservato per integrazione futura
         condition = ad.get("condition", "non specificata")
-        ai, usage = _score_ad(title, price, location, body, keyword, shipping, condition, ebay_value)
+        source = ad.get("source", "Subito.it")
+        ai, usage = _score_ad(title, price, location, body, keyword, shipping, condition, ebay_value, source)
 
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
