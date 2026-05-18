@@ -238,9 +238,31 @@ def _run_score_job() -> dict:
         shipping = ad.get("shipping", "non specificata")
         ad_id = ad["id"]
 
+        # Pre-filtro qualità — zero token AI
+        condition = ad.get("condition", "") or ""
+        title_lower = title.lower()
+
+        # Blacklist condizione
+        if "danneggiato" in condition.lower():
+            supabase.table("scan_results").update({
+                "scored": True, "score": 1, "verdict": "EVITA",
+                "motivazione": "Condizione: danneggiato", "rischi": "",
+            }).eq("id", ad_id).execute()
+            rejected += 1
+            continue
+
+        # Blacklist titolo
+        title_blacklist = ["ricambi", "per pezzi", "non funzionante", "danneggiato"]
+        if any(word in title_lower for word in title_blacklist):
+            supabase.table("scan_results").update({
+                "scored": True, "score": 1, "verdict": "EVITA",
+                "motivazione": "Titolo contiene parola blacklist", "rischi": "",
+            }).eq("id", ad_id).execute()
+            rejected += 1
+            continue
+
         # Scoring AI
         ebay_value = None  # riservato per integrazione futura
-        condition = ad.get("condition", "non specificata")
         source = ad.get("source", "Subito.it")
         ai, usage = _score_ad(title, price, location, body, keyword, shipping, condition, ebay_value, source)
 
