@@ -184,25 +184,43 @@ def _run_notify_job() -> dict:
             .gte("margine_stimato", 15)
             .gte("price_value", min_price)
             .lte("price_value", max_price)
-            .in_("source", ["Subito.it"] if only_italy else ["Subito.it", "Vinted.it"])
-            .order("score", desc=True)
-            .limit(50)
             .execute()
         )
-        all_deals = deals_response.data or []
+        # Filtro piattaforma applicato in Python per gestire il caso Vinted IT
+        # only_italy=True  → Subito + Vinted con country=IT
+        # only_italy=False → Subito + tutti gli annunci Vinted
+        raw_deals = deals_response.data or []
+        if only_italy:
+            all_deals_pool = [
+                d for d in raw_deals
+                if d.get("source") == "Subito.it"
+                or (d.get("source") == "Vinted.it" and d.get("country") == "IT")
+            ]
+        else:
+            all_deals_pool = raw_deals
+        all_deals = all_deals_pool
 
         # Filtra quelli non ancora notificati a questo utente
         new_deals = [d for d in all_deals if d["id"] not in already_notified_ids]
 
         # Ordina per valore atteso: score x margine
-        # Un affare con score 8 e margine 150 (1200) batte score 8 e margine 20 (160)
         new_deals.sort(
             key=lambda d: (d.get("score") or 0) * (d.get("margine_stimato") or 0),
             reverse=True
         )
 
-        # Limita a 5 annunci per email — i restanti verranno inviati al ciclo successivo
-        new_deals = new_deals[:5]
+        # Bilanciamento piattaforme + limite 5 per email
+        # Max 3 deal dalla stessa piattaforma — garantisce slot a Vinted se only_italy=False
+        MAX_DEALS = 5
+        MAX_PER_PLATFORM = 3
+        selected = []
+        platform_counts: dict[str, int] = {}
+        for deal in new_deals:
+            source = deal.get("source", "Subito.it")
+            if platform_counts.get(source, 0) < MAX_PER_PLATFORM and len(selected) < MAX_DEALS:
+                selected.append(deal)
+                platform_counts[source] = platform_counts.get(source, 0) + 1
+        new_deals = selected
 
         if not new_deals:
             results.append({"email": email, "keyword": keyword, "sent": 0})
