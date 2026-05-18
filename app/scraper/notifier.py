@@ -22,10 +22,30 @@ def _build_email_html(deals: list[dict]) -> str:
         motivazione = d.get("motivazione") or ""
         rischi = d.get("rischi") or ""
         sconto = d.get("sconto_consigliato")
+        source = d.get("source", "Subito.it")
+        location = d.get("location") or ""
+        if location == "None" or location == "none":
+            location = ""
 
         score_html = f"{score}/10" if score else "N/D"
         margine_html = f"+€{margine}" if margine else "N/D"
         margine_color = "#16a34a" if margine else "#9ca3af"
+
+        # Colore bottone per piattaforma
+        btn_color = "#15803d" if source == "Vinted.it" else "#dc2626"
+        source_badge = "Vinted" if source == "Vinted.it" else "Subito"
+
+        # Formato prezzo: Vinted mostra prodotto + fee su due righe
+        price_raw = d.get("price_raw", "N/D")
+        import re as _re
+        vinted_match = _re.search(r"prodotto[:\s]+([\d\.]+).*fee[:\s]+([\d\.]+)", price_raw or "", _re.IGNORECASE)
+        if vinted_match:
+            prod = float(vinted_match.group(1))
+            fee = float(vinted_match.group(2))
+            price_display = f'''<div style="font-size:18px;font-weight:600;color:var(--text,#1a1a1a);">{prod:.2f} €</div>
+            <div style="font-size:11px;color:#9ca3af;">+ €{fee:.2f} fee Vinted</div>'''
+        else:
+            price_display = f'<div style="font-size:18px;font-weight:600;color:#1a1a1a;">{price_raw}</div>'
 
         sconto_html = ""
         if sconto and margine:
@@ -46,15 +66,15 @@ def _build_email_html(deals: list[dict]) -> str:
             {d["title"]}
           </div>
           <div style="font-size:12px;color:#9ca3af;margin-bottom:12px;">
-            {d.get("location","")} · {str(d.get("date_listed",""))[:10]}
+            {location + " · " if location else ""}{str(d.get("date_listed",""))[:10]}
           </div>
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
             <div>
-              <div style="font-size:22px;font-weight:800;color:#1a1a1a;">{d.get("price_raw","N/D")}</div>
+              {price_display}
               <div style="font-size:13px;color:{margine_color};font-weight:600;">Margine: {margine_html}</div>
               <div style="font-size:12px;color:#6b7280;">Score: {score_html}</div>
             </div>
-            <a href="{d["url"]}" style="display:inline-block;background:#1a1a1a;color:#ffffff;padding:12px 20px;border-radius:6px;font-size:14px;font-weight:600;text-decoration:none;white-space:nowrap;">
+            <a href="{d["url"]}" style="display:inline-block;background:{btn_color};color:#ffffff;padding:12px 20px;border-radius:6px;font-size:14px;font-weight:600;text-decoration:none;white-space:nowrap;">
               Vedi →
             </a>
           </div>
