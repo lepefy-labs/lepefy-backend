@@ -28,6 +28,8 @@ Prerequisito DB:
 """
 
 import os
+import re
+import json
 import time
 import asyncio
 import requests
@@ -39,7 +41,6 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 VINTED_HOME        = "https://www.vinted.it"
 VINTED_SEARCH_API  = f"{VINTED_HOME}/api/v2/catalog/items"
 VINTED_USER_API    = f"{VINTED_HOME}/api/v2/users"
-VINTED_ITEM_API    = f"{VINTED_HOME}/api/v2/items"
 
 CATALOG_FOTOGRAFIA  = 3848
 CATALOG_ELETTRONICA = 2994
@@ -164,28 +165,51 @@ def _fetch_user_details(session: requests.Session, user_ids: list[int]) -> dict[
 # Item API — descrizione annuncio
 # ──────────────────────────────────────────────
 
-def _fetch_item_descriptions(session: requests.Session, item_ids: list[int]) -> dict[int, str]:
+def _fetch_item_descriptions(session: requests.Session, items: list[dict]) -> dict[int, str]:
     """
-    Chiama /api/v2/items/{id} per ogni item_id.
+    Fetcha la pagina HTML di ogni annuncio nuovo ed estrae la descrizione via regex.
     Ritorna mapping item_id → description (str).
 
-    Chiamata SOLO per i nuovi annunci (non già in DB) per minimizzare
-    le API call nei cicli successivi al primo.
+    Vinted non espone la descrizione nella search API ne in /api/v2/items/{id}
+    (404 senza auth completa). La descrizione e embedded nel HTML della pagina
+    annuncio come stringa JSON — estratta con regex e unescapata con json.loads.
+
+    Chiamata SOLO per i nuovi annunci per minimizzare il traffico (~2MB/pagina).
     """
+    HEADERS_HTML = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "it-IT,it;q=0.9",
+    }
+    # Regex robusta: gestisce escape sequences dentro la stringa JSON
+    DESC_RE = re.compile(r'"description"\s*:\s*"((?:[^"\\\\]|\\\\.)*)"')
+
     result = {}
-    for iid in item_ids:
+    for item in items:
+        iid = item.get("id")
+        url = item.get("url", "")
+        if not iid or not url:
+            if iid:
+                result[iid] = ""
+            continue
         try:
-            r = session.get(f"{VINTED_ITEM_API}/{iid}", timeout=15)
-            if r.status_code == 200:
-                item = r.json().get("item", {})
-                result[iid] = item.get("description", "") or ""
+            r = session.get(url, headers=HEADERS_HTML, timeout=25)
+            if r.status_code != 200:
+                result[iid] = ""
+                continue
+            match = DESC_RE.search(r.text)
+            if match:
+                result[iid] = json.loads('"' + match.group(1) + '"')
             else:
                 result[iid] = ""
         except Exception:
             result[iid] = ""
-        time.sleep(0.3)
-    return result
+        time.sleep(0.5)
 
+    return result
 
 # ──────────────────────────────────────────────
 # Filtri
@@ -299,10 +323,9 @@ def _scan_vinted_keyword(session: requests.Session, keyword: str) -> dict:
     user_details = _fetch_user_details(session, user_ids) if user_ids else {}
 
     # ── Fetch descrizioni (solo per i nuovi, un call per item) ──
-    new_item_ids = [
-        item["id"] for item in truly_new if item.get("id")
-    ]
-    item_descriptions = _fetch_item_descriptions(session, new_item_ids) if new_item_ids else {}
+    new_item_ids = [item["id"] for item in truly_new if item.get("id")]
+    new_items_list = [c for c in truly_new if c.get("id") and c.get("url")]
+    item_descriptions = _fetch_item_descriptions(session, new_items_list) if new_items_list else {}
 
     # ── Salvataggio ──
     new_rows = []
