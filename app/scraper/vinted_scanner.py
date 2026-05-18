@@ -609,146 +609,72 @@ def _fetch_vinted(session: requests.Session, keyword: str, per_page: int = 96) -
 
 def _scan_vinted_keyword(session: requests.Session, keyword: str) -> dict:
     """
-    Fetch Vinted + filtri + arricchimento con user API + salvataggio.
+    Fetch Vinted + filtri + salvataggio annunci completi.
+
+    Un annuncio viene salvato solo se ha tutti i campi obbligatori:
+    - keyword nel titolo
+    - price_value presente
+    - country (da user API) — skip se profilo venditore incompleto al momento dello scan
+    - body (da HTML pagina) — obbligatorio su Vinted, assente = timing issue
+
+    Gli annunci incompleti vengono scartati: ricompariranno al ciclo successivo
+    come truly_new e verranno salvati correttamente una volta che il profilo è completo.
     """
     supabase = _get_supabase()
 
-    # Fetch annunci
+    # ── Fetch annunci ──
     try:
         raw_items = _fetch_vinted(session, keyword)
     except Exception as e:
         return {"keyword": keyword, "error": str(e),
-                "found": 0, "new": 0, "updated": 0, "skipped": 0, "rejected": 0}
+                "found": 0, "new": 0, "updated": 0, "skipped": 0,
+                "rejected": 0, "incomplete": 0}
 
     if not raw_items:
         return {"keyword": keyword, "found": 0, "new": 0,
-                "updated": 0, "skipped": 0, "rejected": 0}
+                "updated": 0, "skipped": 0, "rejected": 0, "incomplete": 0}
 
-    # URL già in DB per questa keyword
+    # ── URL già in DB ──
     existing_response = (
         supabase.table("scan_results")
-        .select("url, price_value, body")
+        .select("url, price_value")
         .eq("keyword", keyword)
         .eq("source", "Vinted.it")
         .execute()
     )
-    existing = {
-        row["url"]: {"price": row["price_value"], "body": row["body"]}
-        for row in (existing_response.data or [])
-    }
+    existing = {row["url"]: row["price_value"] for row in (existing_response.data or [])}
 
     # ── Pre-filtro: keyword nel titolo + price_value presente ──
-    # Fatto PRIMA delle user API call per minimizzare le chiamate
     candidates = []
-    rejected = 0
-
+    rejected   = 0
     for item in raw_items:
-        url   = item.get("url", "")
-        title = item.get("title", "")
-
-        if not url:
+        if not item.get("url"):
             continue
-        if not _keyword_in_title(keyword, title):
+        if not _keyword_in_title(keyword, item.get("title", "")):
             rejected += 1
             continue
         _, price_value = _parse_price(item.get("price"))
         if not price_value:
             continue
-
         candidates.append(item)
 
-    # ── Separa candidati: nuovi vs già in DB ──
-    truly_new   = [c for c in candidates if c.get("url", "") not in existing]
-    in_db       = [c for c in candidates if c.get("url", "") in existing]
-    # Annunci già in DB ma senza descrizione → fetch body
-    needs_body  = [c for c in in_db if not existing.get(c.get("url", ""), {}).get("body")]
+    truly_new = [c for c in candidates if c.get("url") not in existing]
+    in_db     = [c for c in candidates if c.get("url") in existing]
 
-    # ── Fetch user details (user_id univoci, solo sui candidati) ──
+    # ── Fetch user details e descrizioni (solo per i nuovi) ──
     user_ids = list({
         item["user"]["id"]
-        for item in candidates
+        for item in truly_new
         if isinstance(item.get("user"), dict) and item["user"].get("id")
     })
     user_details = _fetch_user_details(session, user_ids) if user_ids else {}
 
-    # ── Fetch descrizioni: nuovi + già in DB senza body ──
-    new_item_ids = [item["id"] for item in truly_new if item.get("id")]
-    items_needing_desc = [
-        c for c in (truly_new + needs_body)
-        if c.get("id") and c.get("url")
-    ]
-    item_descriptions = _fetch_item_descriptions(session, items_needing_desc) if items_needing_desc else {}
+    new_items_list = [c for c in truly_new if c.get("id") and c.get("url")]
+    item_descriptions = _fetch_item_descriptions(session, new_items_list) if new_items_list else {}
 
-    # ── Salvataggio ──
-    new_rows = []
-    skipped  = 0
-    updated  = 0
-
-    # ── Price drop check per annunci già in DB ──
-    for item in in_db:
-        url   = item.get("url", "")
-        title = item.get("title", "")
-
-        price_raw, price_value = _parse_price(item.get("price"))
-        _, total_price = _parse_price(item.get("total_item_price"))
-        _, service_fee = _parse_price(item.get("service_fee"))
-
-        price_raw_full = (
-            f"{total_price:.2f} EUR (prodotto: {price_value:.2f} EUR + fee: {service_fee:.2f} EUR)"
-            if total_price and service_fee else price_raw
-        )
-
-        uid       = item.get("user", {}).get("id") if isinstance(item.get("user"), dict) else None
-        user_info = user_details.get(uid, {}) if uid else {}
-        location  = user_info.get("location", "")
-        country   = user_info.get("country_code")
-
-        old_price = existing[url]["price"]
-        if old_price == price_value:
-            # Aggiorna body se mancante anche senza cambio prezzo
-            if not existing[url].get("body") and item.get("id") in item_descriptions:
-                body = item_descriptions.get(item.get("id"), "")
-                if body:
-                    supabase.table("scan_results").update(
-                        {"body": body}
-                    ).eq("url", url).execute()
-            skipped += 1
-            continue
-        body_fetched = item_descriptions.get(item.get("id"), "") or None
-        if old_price and (old_price - price_value) / old_price >= 0.15:
-            payload = {
-                "price_raw": price_raw_full,
-                "price_value": price_value,
-                "location": location,
-                "country": country,
-                "scored": False,
-                "score": None,
-                "margine_stimato": None,
-                "motivazione": None,
-                "rischi": None,
-                "image_url": item.get("photo", {}).get("url") or None,
-            }
-            if body_fetched and not existing[url].get("body"):
-                payload["body"] = body_fetched
-            supabase.table("scan_results").update(payload).eq("url", url).execute()
-            scan_ids = (
-                supabase.table("scan_results")
-                .select("id")
-                .eq("url", url)
-                .execute()
-            )
-            if scan_ids.data:
-                supabase.table("notifications_log").delete().eq(
-                    "scan_result_id", scan_ids.data[0]["id"]
-                ).execute()
-            updated += 1
-        else:
-            payload = {"price_raw": price_raw_full, "price_value": price_value}
-            if body_fetched and not existing[url].get("body"):
-                payload["body"] = body_fetched
-            supabase.table("scan_results").update(payload).eq("url", url).execute()
-            skipped += 1
     # ── Nuovi annunci ──
+    new_rows   = []
+    incomplete = 0
     for item in truly_new:
         url   = item.get("url", "")
         title = item.get("title", "")
@@ -764,10 +690,15 @@ def _scan_vinted_keyword(session: requests.Session, keyword: str) -> dict:
 
         uid       = item.get("user", {}).get("id") if isinstance(item.get("user"), dict) else None
         user_info = user_details.get(uid, {}) if uid else {}
-        location  = user_info.get("location", "")
         country   = user_info.get("country_code")
-        condition = item.get("status", "non specificata") or "non specificata"
+        location  = user_info.get("location", "")
         body      = item_descriptions.get(item.get("id"), "") or ""
+        condition = item.get("status", "non specificata") or "non specificata"
+
+        # Skip se country o body mancanti (profilo/annuncio incompleto)
+        if not country or not body:
+            incomplete += 1
+            continue
 
         new_rows.append({
             "keyword":    keyword,
@@ -790,16 +721,66 @@ def _scan_vinted_keyword(session: requests.Session, keyword: str) -> dict:
             new_rows, on_conflict="url", ignore_duplicates=True
         ).execute()
 
+    # ── Price drop check per annunci già in DB ──
+    skipped = 0
+    updated = 0
+    for item in in_db:
+        url = item.get("url", "")
+
+        price_raw, price_value = _parse_price(item.get("price"))
+        _, total_price = _parse_price(item.get("total_item_price"))
+        _, service_fee = _parse_price(item.get("service_fee"))
+
+        price_raw_full = (
+            f"{total_price:.2f} EUR (prodotto: {price_value:.2f} EUR + fee: {service_fee:.2f} EUR)"
+            if total_price and service_fee else price_raw
+        )
+
+        old_price = existing[url]
+        if old_price == price_value:
+            skipped += 1
+            continue
+
+        if old_price and (old_price - price_value) / old_price >= 0.15:
+            supabase.table("scan_results").update({
+                "price_raw":  price_raw_full,
+                "price_value": price_value,
+                "scored":     False,
+                "score":      None,
+                "margine_stimato": None,
+                "motivazione": None,
+                "rischi":     None,
+            }).eq("url", url).execute()
+            scan_ids = (
+                supabase.table("scan_results")
+                .select("id")
+                .eq("url", url)
+                .execute()
+            )
+            if scan_ids.data:
+                supabase.table("notifications_log").delete().eq(
+                    "scan_result_id", scan_ids.data[0]["id"]
+                ).execute()
+            updated += 1
+        else:
+            supabase.table("scan_results").update({
+                "price_raw":  price_raw_full,
+                "price_value": price_value,
+            }).eq("url", url).execute()
+            skipped += 1
+
     return {
-        "keyword":  keyword,
-        "found":    len(raw_items),
-        "new":      len(new_rows),
-        "updated":  updated,
-        "skipped":  skipped,
-        "rejected": rejected,
+        "keyword":       keyword,
+        "found":         len(raw_items),
+        "new":           len(new_rows),
+        "updated":       updated,
+        "skipped":       skipped,
+        "rejected":      rejected,
+        "incomplete":    incomplete,
         "user_api_calls": len(user_ids),
-        "item_api_calls": len(new_item_ids),
+        "item_api_calls": len(new_items_list),
     }
+
 
 
 # ──────────────────────────────────────────────
