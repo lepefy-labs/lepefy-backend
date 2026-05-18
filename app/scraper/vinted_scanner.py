@@ -627,12 +627,15 @@ def _scan_vinted_keyword(session: requests.Session, keyword: str) -> dict:
     # URL già in DB per questa keyword
     existing_response = (
         supabase.table("scan_results")
-        .select("url, price_value")
+        .select("url, price_value, body")
         .eq("keyword", keyword)
         .eq("source", "Vinted.it")
         .execute()
     )
-    existing = {row["url"]: row["price_value"] for row in (existing_response.data or [])}
+    existing = {
+        row["url"]: {"price": row["price_value"], "body": row["body"]}
+        for row in (existing_response.data or [])
+    }
 
     # ── Pre-filtro: keyword nel titolo + price_value presente ──
     # Fatto PRIMA delle user API call per minimizzare le chiamate
@@ -655,8 +658,10 @@ def _scan_vinted_keyword(session: requests.Session, keyword: str) -> dict:
         candidates.append(item)
 
     # ── Separa candidati: nuovi vs già in DB ──
-    truly_new  = [c for c in candidates if c.get("url", "") not in existing]
-    in_db      = [c for c in candidates if c.get("url", "") in existing]
+    truly_new   = [c for c in candidates if c.get("url", "") not in existing]
+    in_db       = [c for c in candidates if c.get("url", "") in existing]
+    # Annunci già in DB ma senza descrizione → fetch body
+    needs_body  = [c for c in in_db if not existing.get(c.get("url", ""), {}).get("body")]
 
     # ── Fetch user details (user_id univoci, solo sui candidati) ──
     user_ids = list({
@@ -666,10 +671,13 @@ def _scan_vinted_keyword(session: requests.Session, keyword: str) -> dict:
     })
     user_details = _fetch_user_details(session, user_ids) if user_ids else {}
 
-    # ── Fetch descrizioni (solo per i nuovi, un call per item) ──
+    # ── Fetch descrizioni: nuovi + già in DB senza body ──
     new_item_ids = [item["id"] for item in truly_new if item.get("id")]
-    new_items_list = [c for c in truly_new if c.get("id") and c.get("url")]
-    item_descriptions = _fetch_item_descriptions(session, new_items_list) if new_items_list else {}
+    items_needing_desc = [
+        c for c in (truly_new + needs_body)
+        if c.get("id") and c.get("url")
+    ]
+    item_descriptions = _fetch_item_descriptions(session, items_needing_desc) if items_needing_desc else {}
 
     # ── Salvataggio ──
     new_rows = []
@@ -695,12 +703,20 @@ def _scan_vinted_keyword(session: requests.Session, keyword: str) -> dict:
         location  = user_info.get("location", "")
         country   = user_info.get("country_code")
 
-        old_price = existing[url]
+        old_price = existing[url]["price"]
         if old_price == price_value:
+            # Aggiorna body se mancante anche senza cambio prezzo
+            if not existing[url].get("body") and item.get("id") in item_descriptions:
+                body = item_descriptions.get(item.get("id"), "")
+                if body:
+                    supabase.table("scan_results").update(
+                        {"body": body}
+                    ).eq("url", url).execute()
             skipped += 1
             continue
+        body_fetched = item_descriptions.get(item.get("id"), "") or None
         if old_price and (old_price - price_value) / old_price >= 0.15:
-            supabase.table("scan_results").update({
+            payload = {
                 "price_raw": price_raw_full,
                 "price_value": price_value,
                 "location": location,
@@ -711,7 +727,10 @@ def _scan_vinted_keyword(session: requests.Session, keyword: str) -> dict:
                 "motivazione": None,
                 "rischi": None,
                 "image_url": item.get("photo", {}).get("url") or None,
-            }).eq("url", url).execute()
+            }
+            if body_fetched and not existing[url].get("body"):
+                payload["body"] = body_fetched
+            supabase.table("scan_results").update(payload).eq("url", url).execute()
             scan_ids = (
                 supabase.table("scan_results")
                 .select("id")
@@ -724,12 +743,11 @@ def _scan_vinted_keyword(session: requests.Session, keyword: str) -> dict:
                 ).execute()
             updated += 1
         else:
-            supabase.table("scan_results").update({
-                "price_raw": price_raw_full,
-                "price_value": price_value,
-            }).eq("url", url).execute()
+            payload = {"price_raw": price_raw_full, "price_value": price_value}
+            if body_fetched and not existing[url].get("body"):
+                payload["body"] = body_fetched
+            supabase.table("scan_results").update(payload).eq("url", url).execute()
             skipped += 1
-
     # ── Nuovi annunci ──
     for item in truly_new:
         url   = item.get("url", "")
