@@ -167,14 +167,15 @@ def _fetch_user_details(session: requests.Session, user_ids: list[int]) -> dict[
 
 def _fetch_item_descriptions(session: requests.Session, items: list[dict]) -> dict[int, str]:
     """
-    Fetcha la pagina HTML di ogni annuncio nuovo ed estrae la descrizione via regex.
-    Ritorna mapping item_id → description (str).
+    Fetcha la pagina HTML di ogni annuncio nuovo ed estrae la descrizione.
+    Ritorna mapping item_id -> description (str).
 
-    Vinted non espone la descrizione nella search API ne in /api/v2/items/{id}
-    (404 senza auth completa). La descrizione e embedded nel HTML della pagina
-    annuncio come stringa JSON — estratta con regex e unescapata con json.loads.
+    Vinted non espone la descrizione nella search API ne tramite /api/v2/items/{id}.
+    La descrizione e embedded nel HTML come stringa JSON — estratta con
+    json.JSONDecoder().raw_decode() che gestisce correttamente qualsiasi
+    lunghezza, escape sequence e carattere unicode.
 
-    Chiamata SOLO per i nuovi annunci per minimizzare il traffico (~2MB/pagina).
+    Chiamata SOLO per i nuovi annunci (~2MB/pagina).
     """
     HEADERS_HTML = {
         "User-Agent": (
@@ -184,8 +185,8 @@ def _fetch_item_descriptions(session: requests.Session, items: list[dict]) -> di
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "it-IT,it;q=0.9",
     }
-    # Regex robusta: gestisce escape sequences dentro la stringa JSON
-    DESC_RE = re.compile(r'"description"\s*:\s*"((?:[^"\\\\]|\\\\.)*)"')
+    KEY = '"description":'
+    decoder = json.JSONDecoder()
 
     result = {}
     for item in items:
@@ -200,14 +201,357 @@ def _fetch_item_descriptions(session: requests.Session, items: list[dict]) -> di
             if r.status_code != 200:
                 result[iid] = ""
                 continue
-            match = DESC_RE.search(r.text)
-            if match:
-                result[iid] = json.loads('"' + match.group(1) + '"')
-            else:
+
+            html = r.text
+            idx = html.find(KEY)
+            if idx == -1:
                 result[iid] = ""
+                continue
+
+            # Trova il primo " dopo i due punti (salta eventuali spazi)
+            val_start = idx + len(KEY)
+            while val_start < len(html) and html[val_start] in " \t\n\r":
+                val_start += 1
+
+            if val_start >= len(html) or html[val_start] != '"':
+                result[iid] = ""
+                continue
+
+            # raw_decode parsa la stringa JSON completa dalla posizione val_start
+            value, _ = decoder.raw_decode(html, val_start)
+            result[iid] = value if isinstance(value, str) else ""
+
         except Exception:
             result[iid] = ""
         time.sleep(0.5)
+
+    return result
+
+
+"""
+vinted_scanner.py — Fetch Vinted.it e salvataggio annunci grezzi.
+
+Stesso ruolo di scanner.py ma per Vinted.it.
+Si appoggia alla stessa tabella scan_results (url UNIQUE → dedup automatico).
+
+Endpoint confermato: GET /api/v2/catalog/items
+User API:           GET /api/v2/users/{id}  (paese + città)
+Auth: cookie session (access_token_web) ottenuto visitando la home.
+Nessun ScraperAPI necessario — l'IP di Railway passa Datadome direttamente.
+
+Differenze rispetto a scanner.py:
+- price è un oggetto {"amount": "550.0", "currency_code": "EUR"}
+- total_item_price = prezzo reale per l'acquirente (price + fee ~5%+€0.70)
+- location = "{city}, {country_title}" estratta da /api/v2/users/{id}
+- country = country_code ISO (es. "IT", "ES", "FR") — colonna nuova in scan_results
+- source = 'Vinted.it'
+- image_url = URL foto principale (colonna nuova in scan_results)
+- Nessun campo body (non esposto dalla search API)
+
+Prerequisiti DB:
+    ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS country text DEFAULT NULL;
+    ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS image_url text DEFAULT NULL;
+- Nessun campo body (non esposto dalla search API)
+
+Prerequisito DB:
+    ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS country text DEFAULT NULL;
+"""
+
+import os
+import re
+import json
+import time
+import asyncio
+import requests
+from supabase import create_client, Client
+
+SUPABASE_URL         = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+
+VINTED_HOME        = "https://www.vinted.it"
+VINTED_SEARCH_API  = f"{VINTED_HOME}/api/v2/catalog/items"
+VINTED_USER_API    = f"{VINTED_HOME}/api/v2/users"
+
+CATALOG_FOTOGRAFIA  = 3848
+CATALOG_ELETTRONICA = 2994
+
+HEADERS_HOME = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "it-IT,it;q=0.9",
+}
+
+HEADERS_API = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "it-IT,it;q=0.9",
+    "Referer": "https://www.vinted.it/catalog",
+    "X-Requested-With": "XMLHttpRequest",
+}
+
+
+# ──────────────────────────────────────────────
+# Supabase
+# ──────────────────────────────────────────────
+
+def _get_supabase() -> Client:
+    return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
+
+# ──────────────────────────────────────────────
+# Vinted session
+# ──────────────────────────────────────────────
+
+def _get_vinted_session() -> requests.Session:
+    """
+    Visita la home per ottenere access_token_web dai cookie.
+    JWT valido ~2h — sufficiente per un ciclo di scan completo.
+    """
+    session = requests.Session()
+    session.headers.update(HEADERS_HOME)
+    r = session.get(VINTED_HOME, timeout=15)
+    if r.status_code != 200:
+        raise RuntimeError(f"Vinted home returned {r.status_code}")
+    session.headers.update(HEADERS_API)
+    return session
+
+
+# ──────────────────────────────────────────────
+# Parsing prezzi
+# ──────────────────────────────────────────────
+
+def _parse_price(price_obj) -> tuple[str, float | None]:
+    """
+    Vinted price: {"amount": "550.0", "currency_code": "EUR"}
+    Ritorna (price_raw, price_value).
+    """
+    if isinstance(price_obj, dict):
+        try:
+            amount = float(price_obj.get("amount", 0))
+            currency = price_obj.get("currency_code", "EUR")
+            return f"{amount:.2f} {currency}", amount
+        except (ValueError, TypeError):
+            pass
+    return "N/D", None
+
+
+# ──────────────────────────────────────────────
+# User API — paese e città
+# ──────────────────────────────────────────────
+
+def _fetch_user_details(session: requests.Session, user_ids: list[int]) -> dict[int, dict]:
+    """
+    Chiama /api/v2/users/{id} per ogni user_id univoco.
+    Ritorna mapping user_id → {country_code, location}.
+
+    Chiamata solo per gli item che hanno già passato i filtri
+    (keyword nel titolo + price_value presente) — riduce al minimo le call.
+
+    Campi estratti dalla user API (verificati sul raw):
+        user.country_code       → "IT", "ES", "FR" ...
+        user.country_title      → "Italia", "Spagna" ... (in italiano)
+        user.city               → "Milano", "Sant Antoni de Portmany" ...
+        user.expose_location    → bool (se False la città potrebbe mancare)
+    """
+    result = {}
+    for uid in user_ids:
+        try:
+            r = session.get(f"{VINTED_USER_API}/{uid}", timeout=15)
+            if r.status_code != 200:
+                result[uid] = {"country_code": None, "location": ""}
+                continue
+
+            user = r.json().get("user", {})
+            country_code  = user.get("country_code") or user.get("country_iso_code")
+            country_title = user.get("country_title", "")
+            city          = user.get("city", "") if user.get("expose_location") else ""
+
+            if city and country_title:
+                location = f"{city}, {country_title}"
+            elif country_title:
+                location = country_title
+            else:
+                location = ""
+
+            result[uid] = {
+                "country_code": country_code,  # es. "IT", "ES"
+                "location": location,           # es. "Milano, Italia"
+            }
+        except Exception:
+            result[uid] = {"country_code": None, "location": ""}
+
+        time.sleep(0.3)  # gentile verso Vinted
+
+    return result
+
+
+# ──────────────────────────────────────────────
+# Item API — descrizione annuncio
+"""
+vinted_scanner.py — Fetch Vinted.it e salvataggio annunci grezzi.
+
+Stesso ruolo di scanner.py ma per Vinted.it.
+Si appoggia alla stessa tabella scan_results (url UNIQUE → dedup automatico).
+
+Endpoint confermato: GET /api/v2/catalog/items
+User API:           GET /api/v2/users/{id}  (paese + città)
+Auth: cookie session (access_token_web) ottenuto visitando la home.
+Nessun ScraperAPI necessario — l'IP di Railway passa Datadome direttamente.
+
+Differenze rispetto a scanner.py:
+- price è un oggetto {"amount": "550.0", "currency_code": "EUR"}
+- total_item_price = prezzo reale per l'acquirente (price + fee ~5%+€0.70)
+- location = "{city}, {country_title}" estratta da /api/v2/users/{id}
+- country = country_code ISO (es. "IT", "ES", "FR") — colonna nuova in scan_results
+- source = 'Vinted.it'
+- image_url = URL foto principale (colonna nuova in scan_results)
+- Nessun campo body (non esposto dalla search API)
+
+Prerequisiti DB:
+    ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS country text DEFAULT NULL;
+    ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS image_url text DEFAULT NULL;
+- Nessun campo body (non esposto dalla search API)
+
+Prerequisito DB:
+    ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS country text DEFAULT NULL;
+"""
+
+import os
+import re
+import json
+import time
+import asyncio
+import requests
+from supabase import create_client, Client
+
+SUPABASE_URL         = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+
+VINTED_HOME        = "https://www.vinted.it"
+VINTED_SEARCH_API  = f"{VINTED_HOME}/api/v2/catalog/items"
+VINTED_USER_API    = f"{VINTED_HOME}/api/v2/users"
+
+CATALOG_FOTOGRAFIA  = 3848
+CATALOG_ELETTRONICA = 2994
+
+HEADERS_HOME = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "it-IT,it;q=0.9",
+}
+
+HEADERS_API = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "it-IT,it;q=0.9",
+    "Referer": "https://www.vinted.it/catalog",
+    "X-Requested-With": "XMLHttpRequest",
+}
+
+
+# ──────────────────────────────────────────────
+# Supabase
+# ──────────────────────────────────────────────
+
+def _get_supabase() -> Client:
+    return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
+
+# ──────────────────────────────────────────────
+# Vinted session
+# ──────────────────────────────────────────────
+
+def _get_vinted_session() -> requests.Session:
+    """
+    Visita la home per ottenere access_token_web dai cookie.
+    JWT valido ~2h — sufficiente per un ciclo di scan completo.
+    """
+    session = requests.Session()
+    session.headers.update(HEADERS_HOME)
+    r = session.get(VINTED_HOME, timeout=15)
+    if r.status_code != 200:
+        raise RuntimeError(f"Vinted home returned {r.status_code}")
+    session.headers.update(HEADERS_API)
+    return session
+
+
+# ──────────────────────────────────────────────
+# Parsing prezzi
+# ──────────────────────────────────────────────
+
+def _parse_price(price_obj) -> tuple[str, float | None]:
+    """
+    Vinted price: {"amount": "550.0", "currency_code": "EUR"}
+    Ritorna (price_raw, price_value).
+    """
+    if isinstance(price_obj, dict):
+        try:
+            amount = float(price_obj.get("amount", 0))
+            currency = price_obj.get("currency_code", "EUR")
+            return f"{amount:.2f} {currency}", amount
+        except (ValueError, TypeError):
+            pass
+    return "N/D", None
+
+
+# ──────────────────────────────────────────────
+# User API — paese e città
+# ──────────────────────────────────────────────
+
+def _fetch_user_details(session: requests.Session, user_ids: list[int]) -> dict[int, dict]:
+    """
+    Chiama /api/v2/users/{id} per ogni user_id univoco.
+    Ritorna mapping user_id → {country_code, location}.
+
+    Chiamata solo per gli item che hanno già passato i filtri
+    (keyword nel titolo + price_value presente) — riduce al minimo le call.
+
+    Campi estratti dalla user API (verificati sul raw):
+        user.country_code       → "IT", "ES", "FR" ...
+        user.country_title      → "Italia", "Spagna" ... (in italiano)
+        user.city               → "Milano", "Sant Antoni de Portmany" ...
+        user.expose_location    → bool (se False la città potrebbe mancare)
+    """
+    result = {}
+    for uid in user_ids:
+        try:
+            r = session.get(f"{VINTED_USER_API}/{uid}", timeout=15)
+            if r.status_code != 200:
+                result[uid] = {"country_code": None, "location": ""}
+                continue
+
+            user = r.json().get("user", {})
+            country_code  = user.get("country_code") or user.get("country_iso_code")
+            country_title = user.get("country_title", "")
+            city          = user.get("city", "") if user.get("expose_location") else ""
+
+            if city and country_title:
+                location = f"{city}, {country_title}"
+            elif country_title:
+                location = country_title
+            else:
+                location = ""
+
+            result[uid] = {
+                "country_code": country_code,  # es. "IT", "ES"
+                "location": location,           # es. "Milano, Italia"
+            }
+        except Exception:
+            result[uid] = {"country_code": None, "location": ""}
+
+        time.sleep(0.3)  # gentile verso Vinted
 
     return result
 
