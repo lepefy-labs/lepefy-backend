@@ -141,6 +141,7 @@ def _run_notify_job() -> dict:
         keyword = sub["keyword"].lower()
         min_price = sub.get("min_threshold", 0)
         max_price = sub["max_threshold"]
+        only_italy = sub.get("only_italy", True)
 
         # Deal già notificati a questo utente
         notified_response = (
@@ -163,6 +164,7 @@ def _run_notify_job() -> dict:
             .gte("margine_stimato", 15)
             .gte("price_value", min_price)
             .lte("price_value", max_price)
+            .in_("source", ["Subito.it"] if only_italy else ["Subito.it", "Vinted.it"])
             .order("score", desc=True)
             .limit(50)
             .execute()
