@@ -32,7 +32,7 @@ VINTED_HOME       = "https://www.vinted.it"
 VINTED_SEARCH_API = f"{VINTED_HOME}/api/v2/catalog/items"
 VINTED_USER_API   = f"{VINTED_HOME}/api/v2/users"
 
-DEFECTIVE_STATUS_IDS = [4, 7]   # 4=Discrete, 7=Non del tutto funzionante
+DEFECTIVE_STATUS_IDS = [7]   # 4=Discrete, 7=Non del tutto funzionante
 ALLOWED_COUNTRIES    = {"IT", "FR", "DE", "ES"}
 CATALOG_ELETTRONICA  = 2994
 
