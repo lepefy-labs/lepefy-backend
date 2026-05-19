@@ -25,7 +25,6 @@ BREVO_API_KEY        = os.getenv("BREVO_API_KEY")
 EMAIL_FROM           = os.getenv("EMAIL_FROM", "noreply@lepefy.it")
 EMAIL_FROM_NAME      = os.getenv("EMAIL_FROM_NAME", "Lepefy")
 
-DEFECTIVE_CONDITIONS = ("Non del tutto funzionante")
 MAX_DEALS            = 5
 
 
@@ -251,7 +250,7 @@ def _run_defective_notify_job() -> dict:
                 .ilike("keyword", keyword)
                 .eq("source", "Vinted.it")
                 .eq("scored", True)
-                .in_("condition", list(DEFECTIVE_CONDITIONS))
+                .eq("condition", "Non del tutto funzionante")
                 .gte("price_value", min_price)
                 .lte("price_value", max_price)
                 .execute()
