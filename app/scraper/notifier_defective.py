@@ -25,7 +25,7 @@ BREVO_API_KEY        = os.getenv("BREVO_API_KEY")
 EMAIL_FROM           = os.getenv("EMAIL_FROM", "noreply@lepefy.it")
 EMAIL_FROM_NAME      = os.getenv("EMAIL_FROM_NAME", "Lepefy")
 
-DEFECTIVE_CONDITIONS = ("Discrete", "Non del tutto funzionante")
+DEFECTIVE_CONDITIONS = ("Non del tutto funzionante")
 MAX_DEALS            = 5
 
 
@@ -148,7 +148,7 @@ def _build_defective_email_html(deals: list[dict]) -> str:
                 border-left:1px solid #e5e7eb;border-right:1px solid #e5e7eb;">
       <p style="color:#374151;font-size:14px;margin:0;">
         Abbiamo trovato <strong>{len(deals)} articoli</strong>
-        in condizioni Discrete o Non del tutto funzionante
+        in condizioni Non del tutto funzionante
         nella tua fascia prezzo:
       </p>
     </div>
