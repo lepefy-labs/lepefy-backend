@@ -13,6 +13,7 @@ from app.scraper.market_analytics import (
 )
 from app.scraper.vinted_scanner import run_vinted_scan
 from app.scraper.vinted_defective_scanner import run_vinted_defective_scan
+from app.scraper.notifier_defective import run_defective_notify_job
 
 app = FastAPI(title="Lepefy Backend API")
 
@@ -87,6 +88,11 @@ async def cron_notify(secret: str = ""):
         return {"error": "unauthorized"}
     return await run_notify_job()
 
+@app.get("/cron/notify-defective")
+async def cron_notify_defective(secret: str = ""):
+    if secret != os.getenv("CRON_SECRET"):
+        return {"error": "unauthorized"}
+    return await run_defective_notify_job()
 
 # ---------------------------------------------------------------------------
 # Market scanner
