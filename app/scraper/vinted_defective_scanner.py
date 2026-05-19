@@ -308,7 +308,7 @@ def _scan_defective_keyword(session: requests.Session, keyword: str) -> dict:
         condition = item.get("status", "non specificata") or "non specificata"
 
         # Skip annunci incompleti o paesi non supportati
-        if not country or not body or country not in ALLOWED_COUNTRIES:
+        if not country or country not in ALLOWED_COUNTRIES:
             incomplete += 1
             continue
 
