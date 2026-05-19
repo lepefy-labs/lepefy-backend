@@ -2,28 +2,26 @@
 vinted_defective_scanner.py — Fetch annunci Vinted in condizioni "Discrete" o
 "Non del tutto funzionante" per keyword tech riparabili.
 
-Stesso pipeline di vinted_scanner.py ma con status_ids fissi:
-    status_id=4 → "Discrete"
-    status_id=7 → "Non del tutto funzionante"
+Stesso pipeline di vinted_scanner.py ma con:
+    - status_ids fissi: 4=Discrete, 7=Non del tutto funzionante
+    - scored=True all'inserimento (bypass scorer — AI non utile su articoli rotti)
+    - keyword lette da keywords WHERE include_defective=true
 
 Scrive nella stessa tabella scan_results (url UNIQUE → dedup automatico con
-il scanner principale). Il campo condition distingue gli annunci difettosi
-da quelli normali per lo scorer e il notifier.
-
-Keyword: lette dalla tabella keywords filtrando su include_defective=true.
-Il flag va abilitato manualmente per keyword keyword (solo tech riparabili).
+il scanner principale). Il campo condition distingue gli annunci difettosi.
 
 Prerequisiti DB:
-    -- stessi di vinted_scanner.py (country, image_url già presenti)
-    ALTER TABLE keywords ADD COLUMN IF NOT EXISTS include_defective boolean DEFAULT false;
+    ALTER TABLE keywords
+    ADD COLUMN IF NOT EXISTS include_defective boolean DEFAULT false;
+
     UPDATE keywords SET include_defective = true
     WHERE keyword IN ('iphone','macbook','thinkpad','dell latitude','hp elitebook');
 """
 
 import json
+import os
 import time
 import asyncio
-import os
 import requests
 from supabase import create_client, Client
 
@@ -34,13 +32,9 @@ VINTED_HOME       = "https://www.vinted.it"
 VINTED_SEARCH_API = f"{VINTED_HOME}/api/v2/catalog/items"
 VINTED_USER_API   = f"{VINTED_HOME}/api/v2/users"
 
-# Condizioni target — verificate con test su vinted.it
-DEFECTIVE_STATUS_IDS = [4, 7]  # 4=Discrete, 7=Non del tutto funzionante
-
-# Paesi accettati
-ALLOWED_COUNTRIES = {"IT", "FR", "DE", "ES"}
-
-CATALOG_ELETTRONICA = 2994
+DEFECTIVE_STATUS_IDS = [4, 7]   # 4=Discrete, 7=Non del tutto funzionante
+ALLOWED_COUNTRIES    = {"IT", "FR", "DE", "ES"}
+CATALOG_ELETTRONICA  = 2994
 
 HEADERS_HOME = {
     "User-Agent": (
@@ -108,7 +102,7 @@ def _parse_price(price_obj) -> tuple[str, float | None]:
 
 
 # ──────────────────────────────────────────────
-# User API
+# User API — paese e città
 # ──────────────────────────────────────────────
 
 def _fetch_user_details(session: requests.Session, user_ids: list[int]) -> dict[int, dict]:
@@ -141,9 +135,14 @@ def _fetch_user_details(session: requests.Session, user_ids: list[int]) -> dict[
 # ──────────────────────────────────────────────
 
 def _fetch_item_descriptions(session: requests.Session, items: list[dict]) -> dict[int, str]:
+    """
+    Estrae la descrizione dalla pagina HTML dell'annuncio via json.JSONDecoder.
+    Chiamata solo per i nuovi annunci (~2MB/pagina).
+    """
     KEY     = '"description":'
     decoder = json.JSONDecoder()
     result  = {}
+
     for item in items:
         iid = item.get("id")
         url = item.get("url", "")
@@ -172,6 +171,7 @@ def _fetch_item_descriptions(session: requests.Session, items: list[dict]) -> di
         except Exception:
             result[iid] = ""
         time.sleep(0.5)
+
     return result
 
 
@@ -196,7 +196,6 @@ def _fetch_vinted_defective(
     status_id: int,
     per_page: int = 96,
 ) -> list[dict]:
-    """Fetch annunci Vinted filtrati per keyword e status_id."""
     params = {
         "page":        1,
         "per_page":    per_page,
@@ -218,8 +217,9 @@ def _fetch_vinted_defective(
 
 def _scan_defective_keyword(session: requests.Session, keyword: str) -> dict:
     """
-    Fetch annunci difettosi (Discrete + Non del tutto funzionante) per una keyword.
-    Logica identica a vinted_scanner.py ma con status_ids fissi.
+    Fetch annunci Vinted difettosi per una keyword.
+    Gli annunci vengono salvati con scored=True (bypass scorer):
+    la valutazione di articoli da riparare è demandata all'utente.
     """
     supabase = _get_supabase()
 
@@ -246,7 +246,7 @@ def _scan_defective_keyword(session: requests.Session, keyword: str) -> dict:
             "incomplete": 0, "errors": fetch_errors,
         }
 
-    # URL già in DB per questa keyword (source=Vinted.it)
+    # URL già in DB per questa keyword
     existing_response = (
         supabase.table("scan_results")
         .select("url, price_value")
@@ -256,7 +256,7 @@ def _scan_defective_keyword(session: requests.Session, keyword: str) -> dict:
     )
     existing = {row["url"]: row["price_value"] for row in (existing_response.data or [])}
 
-    # Pre-filtro: keyword nel titolo + price_value
+    # Pre-filtro: keyword nel titolo + price_value presente
     candidates = []
     rejected   = 0
     for item in raw_items:
@@ -307,6 +307,7 @@ def _scan_defective_keyword(session: requests.Session, keyword: str) -> dict:
         body      = item_descriptions.get(item.get("id"), "") or ""
         condition = item.get("status", "non specificata") or "non specificata"
 
+        # Skip annunci incompleti o paesi non supportati
         if not country or not body or country not in ALLOWED_COUNTRIES:
             incomplete += 1
             continue
@@ -321,7 +322,7 @@ def _scan_defective_keyword(session: requests.Session, keyword: str) -> dict:
             "url":         url,
             "date_listed": None,
             "source":      "Vinted.it",
-            "scored":      False,
+            "scored":      True,   # bypass scorer — valutazione demandata all'utente
             "condition":   condition,
             "image_url":   item.get("photo", {}).get("url") or None,
             "body":        body,
@@ -332,7 +333,7 @@ def _scan_defective_keyword(session: requests.Session, keyword: str) -> dict:
             new_rows, on_conflict="url", ignore_duplicates=True
         ).execute()
 
-    # Price drop check
+    # Price drop check per annunci già in DB
     skipped = 0
     updated = 0
     for item in in_db:
@@ -356,7 +357,7 @@ def _scan_defective_keyword(session: requests.Session, keyword: str) -> dict:
             supabase.table("scan_results").update({
                 "price_raw":       price_raw_full,
                 "price_value":     price_value,
-                "scored":          False,
+                "scored":          True,   # rimane True anche dopo price drop
                 "score":           None,
                 "margine_stimato": None,
                 "motivazione":     None,
@@ -400,8 +401,7 @@ def _scan_defective_keyword(session: requests.Session, keyword: str) -> dict:
 
 async def run_vinted_defective_scan() -> dict:
     """
-    Cron job: fetch annunci Vinted difettosi (Discrete + Non del tutto funzionante)
-    per keyword tech riparabili.
+    Cron job: fetch annunci Vinted difettosi per keyword con include_defective=True.
     """
     try:
         session = await asyncio.to_thread(_get_vinted_session)
