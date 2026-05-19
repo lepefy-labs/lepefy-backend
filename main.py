@@ -12,6 +12,7 @@ from app.scraper.market_analytics import (
     get_active_listings,
 )
 from app.scraper.vinted_scanner import run_vinted_scan
+from app.scraper.vinted_defective_scanner import run_vinted_defective_scan
 
 app = FastAPI(title="Lepefy Backend API")
 
@@ -58,6 +59,12 @@ async def cron_vinted_scan(secret: str = ""):
     if secret != os.getenv("CRON_SECRET"):
         return {"error": "unauthorized"}
     return await run_vinted_scan()
+
+@app.get("/cron/vinted-defective-scan")
+async def cron_vinted_defective_scan(secret: str = ""):
+    if secret != os.getenv("CRON_SECRET"):
+        return {"error": "unauthorized"}
+    return await run_vinted_defective_scan()
 
 @app.get("/cron/score")
 async def cron_score(secret: str = ""):
