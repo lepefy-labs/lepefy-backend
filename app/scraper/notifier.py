@@ -145,6 +145,7 @@ def _run_notify_job() -> dict:
         supabase.table("subscriptions")
         .select("*")
         .eq("active", True)
+        .eq("include_defective", False)
         .execute()
     )
     subscriptions = subs_response.data or []
@@ -180,7 +181,7 @@ def _run_notify_job() -> dict:
             .select("*")
             .ilike("keyword", keyword)
             .eq("scored", True)
-            .gte("score", 2)
+            .gte("score", 7)
             .gte("margine_stimato", 15)
             .gte("price_value", min_price)
             .lte("price_value", max_price)
