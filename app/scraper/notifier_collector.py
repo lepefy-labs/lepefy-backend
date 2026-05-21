@@ -178,7 +178,7 @@ def _build_collector_email_html(deals: list[dict], keyword: str) -> str:
     <div style="background:#f9fafb;border:1px solid #e5e7eb;
                 border-radius:0 0 8px 8px;padding:16px 24px;">
       <p style="color:#9ca3af;font-size:11px;margin:0;">
-        Stai ricevendo questa email perché sei abbonato a Lepefy Premium.<br>
+        Stai ricevendo questa email perché sei iscritto a Lepefy.<br>
         <a href="mailto:{EMAIL_FROM}" style="color:#9ca3af;">Contattaci</a>
         per disdire.
       </p>
@@ -298,7 +298,9 @@ def _run_collector_notify_job() -> dict:
 
         selected_deals = [d for d, _ in all_deals]
         html    = _build_collector_email_html(selected_deals, primary_keyword)
-        subject = f"🏷️ Lepefy — {len(selected_deals)} articoli per la tua collezione"
+        sources = sorted({sub.get("source") for sub in user_subs if sub.get("source")})
+        source_suffix = f" su {' e '.join(sources)}" if sources else ""
+        subject = f"🏷️ Lepefy — {len(selected_deals)} articoli per la tua collezione{source_suffix}"
 
         try:
             _send_email(email, subject, html)
