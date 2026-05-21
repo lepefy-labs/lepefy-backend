@@ -237,6 +237,7 @@ def _get_active_keywords() -> list[str]:
         supabase.table("keywords")
         .select("keyword")
         .eq("active", True)
+        .or_("only_collector.eq.false,only_collector.is.null")
         .execute()
     )
     return [row["keyword"].lower() for row in (response.data or [])]
