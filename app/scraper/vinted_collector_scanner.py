@@ -7,6 +7,8 @@ Stesso pipeline di vinted_defective_scanner.py ma con:
     - Filtro prezzo dalla fascia min/max delle subscription con is_collector=true
     - scored=True all'inserimento (bypass scorer — collezionisti cercano oggetti
       specifici, non margine di rivendita)
+    - TITLE_BLACKLIST: scarta annunci con parole non pertinenti nel titolo
+      (accessori moda, oggettistica, libri, ecc.)
 
 Prerequisiti DB:
     ALTER TABLE keywords
@@ -35,6 +37,15 @@ VINTED_SEARCH_API = f"{VINTED_HOME}/api/v2/catalog/items"
 VINTED_USER_API   = f"{VINTED_HOME}/api/v2/users"
 
 ALLOWED_COUNTRIES = {"IT", "FR"}
+
+# Parole nel titolo che indicano annunci non pertinenti (moda, oggettistica, ecc.)
+# Applicate case-insensitive prima del salvataggio in scan_results.
+TITLE_BLACKLIST = {
+    "zaino", "borsa", "orologio", "cinturino", "occhiali", "profumo",
+    "scarpe", "cappello", "giacca", "pantaloni", "gonna", "vestito",
+    "felpa", "maglione", "camicia", "stampa", "poster", "libro",
+    "manuale", "custodia", "cover", "skin",
+}
 
 HEADERS_HOME = {
     "User-Agent": (
@@ -180,6 +191,12 @@ def _keyword_in_title(keyword: str, title: str) -> bool:
     return all(token in title_lower for token in keyword.lower().split())
 
 
+def _is_blacklisted(title: str) -> bool:
+    """True se il titolo contiene almeno una parola della TITLE_BLACKLIST."""
+    title_lower = title.lower()
+    return any(word in title_lower for word in TITLE_BLACKLIST)
+
+
 def _price_in_any_range(price: float, ranges: list[tuple[float, float]]) -> bool:
     return any(lo <= price <= hi for lo, hi in ranges)
 
@@ -228,17 +245,16 @@ def _scan_collector_keyword(
         return {
             "keyword": keyword, "found": 0, "new": 0,
             "updated": 0, "skipped": 0, "rejected": 0,
-            "incomplete": 0, "errors": [str(e)],
+            "blacklisted": 0, "incomplete": 0, "errors": [str(e)],
         }
 
     if not raw_items:
         return {
             "keyword": keyword, "found": 0, "new": 0,
             "updated": 0, "skipped": 0, "rejected": 0,
-            "incomplete": 0, "errors": [],
+            "blacklisted": 0, "incomplete": 0, "errors": [],
         }
 
-    # URL già in DB per questa keyword
     existing_response = (
         supabase.table("scan_results")
         .select("url, price_value")
@@ -248,14 +264,18 @@ def _scan_collector_keyword(
     )
     existing = {row["url"]: row["price_value"] for row in (existing_response.data or [])}
 
-    # Pre-filtro: keyword nel titolo + price_value presente + fascia prezzo subscription
     candidates = []
-    rejected   = 0
+    rejected    = 0
+    blacklisted = 0
     for item in raw_items:
         if not item.get("url"):
             continue
-        if not _keyword_in_title(keyword, item.get("title", "")):
+        title = item.get("title", "")
+        if not _keyword_in_title(keyword, title):
             rejected += 1
+            continue
+        if _is_blacklisted(title):
+            blacklisted += 1
             continue
         _, pv = _parse_price(item.get("price"))
         if not pv:
@@ -268,7 +288,6 @@ def _scan_collector_keyword(
     truly_new = [c for c in candidates if c.get("url") not in existing]
     in_db     = [c for c in candidates if c.get("url") in existing]
 
-    # Fetch user details — solo per i nuovi
     user_ids = list({
         item["user"]["id"]
         for item in truly_new
@@ -279,7 +298,6 @@ def _scan_collector_keyword(
     new_items_list    = [c for c in truly_new if c.get("id") and c.get("url")]
     item_descriptions = _fetch_item_descriptions(session, new_items_list) if new_items_list else {}
 
-    # Nuovi annunci
     new_rows   = []
     incomplete = 0
     for item in truly_new:
@@ -327,7 +345,6 @@ def _scan_collector_keyword(
             new_rows, on_conflict="url", ignore_duplicates=True
         ).execute()
 
-    # Price drop check per annunci già in DB
     skipped = 0
     updated = 0
     for item in in_db:
@@ -382,6 +399,7 @@ def _scan_collector_keyword(
         "updated":        updated,
         "skipped":        skipped,
         "rejected":       rejected,
+        "blacklisted":    blacklisted,
         "incomplete":     incomplete,
         "user_api_calls": len(user_ids),
         "item_api_calls": len(new_items_list),
@@ -419,7 +437,6 @@ async def run_vinted_collector_scan() -> dict:
     if not keywords:
         return {"status": "ok", "message": "Nessuna keyword con only_collector=true"}
 
-    # Fetch fasce prezzo da subscriptions collezionisti, raggruppate per keyword
     try:
         subs_response = (
             supabase.table("subscriptions")
@@ -453,6 +470,7 @@ async def run_vinted_collector_scan() -> dict:
         "source":               "Vinted.it (collector)",
         "keywords_scanned":     len(keywords),
         "total_new":            sum(r.get("new", 0) for r in results),
+        "total_blacklisted":    sum(r.get("blacklisted", 0) for r in results),
         "total_user_api_calls": sum(r.get("user_api_calls", 0) for r in results),
         "total_item_api_calls": sum(r.get("item_api_calls", 0) for r in results),
         "results":              results,
