@@ -175,6 +175,23 @@ def _build_collector_email_html(deals: list[dict], keyword: str) -> str:
       </p>
     </div>
     <div style="padding:12px 0;">{cards}</div>
+    <div style="background:#eef2ff;border:1px solid #c7d2fe;
+                border-radius:8px;padding:16px 20px;margin-bottom:10px;
+                text-align:center;">
+      <p style="color:#3730a3;font-size:13px;margin:0 0 4px;">
+        🔍 Altri deal su elettronica e fotografia ti aspettano su Lepefy.
+      </p>
+      <p style="color:#6366f1;font-size:11px;margin:0 0 10px;">
+        Sul sito i deal pubblici arrivano con 12 ore di ritardo —
+        tu li hai già visti per primo.
+      </p>
+      <a href="https://www.lepefy.it/deals"
+         style="display:inline-block;background:#4f46e5;color:#ffffff;
+                padding:9px 20px;border-radius:6px;font-size:13px;
+                font-weight:600;text-decoration:none;">
+        Esplora i deal →
+      </a>
+    </div>
     <div style="background:#f9fafb;border:1px solid #e5e7eb;
                 border-radius:0 0 8px 8px;padding:16px 24px;">
       <p style="color:#9ca3af;font-size:11px;margin:0;">
