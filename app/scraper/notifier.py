@@ -102,6 +102,18 @@ def _build_email_html(deals: list[dict]) -> str:
     <div style="padding:12px 0;">
       {cards}
     </div>
+    <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:16px 20px;margin-bottom:10px;text-align:center;">
+      <p style="color:#166534;font-size:13px;margin:0 0 4px;">
+        🔍 Altre occasioni e deal aggiornati su Lepefy.
+      </p>
+      <p style="color:#16a34a;font-size:11px;margin:0 0 10px;">
+        Sul sito i deal pubblici arrivano con 12 ore di ritardo — tu li hai già visti per primo.
+      </p>
+      <a href="https://www.lepefy.com/deals"
+         style="display:inline-block;background:#15803d;color:#ffffff;padding:9px 20px;border-radius:6px;font-size:13px;font-weight:600;text-decoration:none;">
+        Esplora i deal →
+      </a>
+    </div>
     <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:0 0 8px 8px;padding:16px 24px;">
       <p style="color:#9ca3af;font-size:11px;margin:0;">
         Stai ricevendo questa email perchè sei abbonato a Lepefy Premium.<br>
