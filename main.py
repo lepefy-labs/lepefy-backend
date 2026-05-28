@@ -1,21 +1,22 @@
 import os
 import hashlib
 from fastapi import FastAPI, Request
-from app.scraper.scanner import run_lepe_scan, run_scan_and_save
-from app.scraper.scorer import run_score_job
-from app.scraper.notifier import run_notify_job
-from app.scraper.market_scanner import run_market_scan
+from app.scraper.scanner          import run_lepe_scan, run_scan_and_save
+from app.scraper.scorer           import run_score_job
+from app.scraper.notifier         import run_notify_job
+from app.scraper.market_scanner   import run_market_scan
 from app.scraper.market_analytics import (
     get_price_stats,
     get_time_to_sell,
     get_price_trend,
     get_active_listings,
 )
-from app.scraper.vinted_scanner import run_vinted_scan
+from app.scraper.vinted_scanner           import run_vinted_scan
 from app.scraper.vinted_defective_scanner import run_vinted_defective_scan
-from app.scraper.notifier_defective import run_defective_notify_job
+from app.scraper.notifier_defective       import run_defective_notify_job
 from app.scraper.vinted_collector_scanner import run_vinted_collector_scan
-from app.scraper.notifier_collector import run_collector_notify_job
+from app.scraper.notifier_collector       import run_collector_notify_job
+from app.scraper.content_generator        import run_content_job
 
 app = FastAPI(title="Lepefy Backend API")
 
@@ -108,6 +109,15 @@ async def cron_notify_collector(secret: str = ""):
         return {"error": "unauthorized"}
     return await run_collector_notify_job()
 
+@app.get("/cron/content")
+async def cron_content(secret: str = ""):
+    """
+    Genera contenuti social per i top deal e li invia via email.
+    """
+    if secret != os.getenv("CRON_SECRET"):
+        return {"error": "unauthorized"}
+    return run_content_job()
+    
 # ---------------------------------------------------------------------------
 # Market scanner
 # ---------------------------------------------------------------------------
