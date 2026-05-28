@@ -1,6 +1,6 @@
 """
 content_generator.py
-Legge i top deal delle ultime 24h da scan_results,
+Legge i top deal da scan_results (nessun filtro temporale),
 genera caption + hashtag per Instagram, TikTok e Facebook
 tramite Claude Haiku, invia tutto via email con Brevo
 e logga i token consumati su ai_usage_log.
@@ -9,7 +9,7 @@ e logga i token consumati su ai_usage_log.
 import os
 import json
 import httpx
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -23,7 +23,6 @@ CONTENT_EMAIL_TO     = os.environ["CONTENT_EMAIL_TO"]
 
 TOP_N_DEALS    = 3
 MIN_SCORE      = 6
-HOURS_LOOKBACK = 24
 
 # Prezzi Haiku ($ per milione di token)
 HAIKU_INPUT_PRICE  = 0.80 / 1_000_000
@@ -42,13 +41,11 @@ def _supabase_headers() -> dict:
 
 
 def _fetch_top_deals() -> list[dict]:
-    since = (datetime.now(timezone.utc) - timedelta(hours=HOURS_LOOKBACK)).isoformat()
     params = {
         "select": "title,price_value,score,margine_stimato,motivazione,keyword,location,url",
-        "created_at": f"gte.{since}",
-        "score": f"gte.{MIN_SCORE}",
-        "order": "score.desc",
-        "limit": str(TOP_N_DEALS),
+        "score":  f"gte.{MIN_SCORE}",
+        "order":  "score.desc,created_at.desc",
+        "limit":  str(TOP_N_DEALS),
     }
     with httpx.Client() as client:
         resp = client.get(
@@ -263,7 +260,7 @@ def run_content_job() -> dict:
     # 1. Fetch deal
     deals = _fetch_top_deals()
     if not deals:
-        return {"status": "skip", "reason": "Nessun deal con score sufficiente nelle ultime 24h"}
+        return {"status": "skip", "reason": "Nessun deal con score sufficiente"}
 
     # 2. Genera contenuti tracciando i token
     contents      = []
