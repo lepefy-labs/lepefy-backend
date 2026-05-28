@@ -185,7 +185,7 @@ def _build_collector_email_html(deals: list[dict], keyword: str) -> str:
         Sul sito i deal pubblici arrivano con 12 ore di ritardo —
         tu li hai già visti per primo.
       </p>
-      <a href="https://www.lepefy.it/deals"
+      <a href="https://www.lepefy.com/deals"
          style="display:inline-block;background:#4f46e5;color:#ffffff;
                 padding:9px 20px;border-radius:6px;font-size:13px;
                 font-weight:600;text-decoration:none;">
