@@ -29,6 +29,7 @@ from supabase import create_client, Client
 SUPABASE_URL         = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 BREVO_API_KEY        = os.getenv("BREVO_API_KEY")
+EMAIL_CONTACT        = os.getenv("EMAIL_CONTACT", "ciao@lepefy.it")
 EMAIL_FROM           = os.getenv("EMAIL_FROM", "noreply@lepefy.it")
 EMAIL_FROM_NAME      = os.getenv("EMAIL_FROM_NAME", "Lepefy")
 
@@ -196,8 +197,7 @@ def _build_collector_email_html(deals: list[dict], keyword: str) -> str:
                 border-radius:0 0 8px 8px;padding:16px 24px;">
       <p style="color:#9ca3af;font-size:11px;margin:0;">
         Stai ricevendo questa email perché sei iscritto a Lepefy.<br>
-        <a href="mailto:{EMAIL_FROM}" style="color:#9ca3af;">Contattaci</a>
-        per disdire.
+        <a href="mailto:{EMAIL_CONTACT}" style="color:#9ca3af;">Contattaci</a> per disdire.
       </p>
     </div>
   </div>
