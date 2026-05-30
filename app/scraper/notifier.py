@@ -3,11 +3,12 @@ import asyncio
 import httpx
 from supabase import create_client, Client
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_URL         = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
-BREVO_API_KEY = os.getenv("BREVO_API_KEY")
-EMAIL_FROM = os.getenv("EMAIL_FROM", "noreply@tuodominio.it")
-EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "Lepefy")
+BREVO_API_KEY        = os.getenv("BREVO_API_KEY")
+EMAIL_CONTACT        = os.getenv("EMAIL_CONTACT", "ciao@lepefy.it")
+EMAIL_FROM           = os.getenv("EMAIL_FROM", "noreply@lepefy.com")
+EMAIL_FROM_NAME      = os.getenv("EMAIL_FROM_NAME", "Lepefy")
 
 
 def _get_supabase() -> Client:
@@ -117,7 +118,7 @@ def _build_email_html(deals: list[dict]) -> str:
     <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:0 0 8px 8px;padding:16px 24px;">
       <p style="color:#9ca3af;font-size:11px;margin:0;">
         Stai ricevendo questa email perchè sei abbonato a Lepefy Premium.<br>
-        <a href="mailto:{EMAIL_FROM}" style="color:#9ca3af;">Contattaci</a> per disdire.
+        <a href="mailto:{EMAIL_CONTACT}" style="color:#9ca3af;">Contattaci</a> per disdire.
       </p>
     </div>
   </div>
