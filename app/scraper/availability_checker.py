@@ -184,8 +184,8 @@ def _check_subito(url: str) -> tuple[bool, str]:
         params = {"api_key": SCRAPERAPI_KEY, "url": url}
         r = requests.get(SCRAPERAPI_URL, params=params, timeout=60)
 
-        if r.status_code == 404:
-            return False, "http_404"
+        if r.status_code in (404, 410):
+            return False, f"http_{r.status_code}"
         if r.status_code != 200:
             return True, f"http_{r.status_code}_transitorio"
 
