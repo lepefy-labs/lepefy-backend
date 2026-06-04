@@ -9,10 +9,13 @@ Strategia di priorità (ordine di esecuzione per batch):
   2. created_at < 7 giorni, mai controllati (last_checked_at IS NULL)
   3. Tutto il resto ordinato per last_checked_at ASC (i più vecchi prima)
 
-Subito.it  → fetch via ScraperAPI → parse __NEXT_DATA__ → cerca url nell'annuncio
-            Se 404 / redirect / annuncio non trovato → is_sold = true
-Vinted.it  → GET /api/v2/items/{id} via sessione cookie
-            Se 404 / can_be_sold=false / status=sold → is_sold = true
+Subito.it  → fetch via ScraperAPI → parse __NEXT_DATA__ o status HTTP
+            410 Gone → is_sold = true
+            404      → is_sold = true
+
+Vinted.it  → fetch pagina pubblica (no cookie, no API)
+            Vinted inietta i dati item via self.__next_f.push nell'HTML.
+            Campi rilevati: is_closed, item_closing_action, is_reserved.
 
 Prerequisiti DB:
     ALTER TABLE scan_results
@@ -39,8 +42,7 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 SCRAPERAPI_KEY       = os.getenv("SCRAPERAPI_KEY")
 SCRAPERAPI_URL       = "http://api.scraperapi.com"
 
-VINTED_HOME     = "https://www.vinted.it"
-VINTED_ITEM_API = f"{VINTED_HOME}/api/v2/items"
+VINTED_HOME = "https://www.vinted.it"
 
 BATCH_SIZE = 100
 
@@ -51,16 +53,6 @@ HEADERS_VINTED_HOME = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "it-IT,it;q=0.9",
-}
-HEADERS_VINTED_API = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "it-IT,it;q=0.9",
-    "Referer": "https://www.vinted.it/catalog",
-    "X-Requested-With": "XMLHttpRequest",
 }
 
 
@@ -83,7 +75,7 @@ def _now() -> str:
 def _fetch_batch(
     supabase: Client,
     limit: int = BATCH_SIZE,
-    source_filter: str | None = None,   # "subito", "vinted", None = tutti
+    source_filter: str | None = None,
 ) -> list[dict]:
     """
     Legge fino a `limit` record da controllare, in ordine di priorità:
@@ -177,7 +169,9 @@ def _extract_item_id_subito(url: str) -> str | None:
 def _check_subito(url: str) -> tuple[bool, str]:
     """
     Ritorna (available: bool, reason: str).
-    reason descrive l'esito per il dry_run log.
+    - 404 / 410 → venduto/rimosso
+    - __NEXT_DATA__ mancante → transitorio (ScraperAPI ha restituito CAPTCHA)
+    - status nel JSON → sold/removed/expired → venduto
     """
     item_id = _extract_item_id_subito(url)
     try:
@@ -236,52 +230,43 @@ def _extract_item_id_vinted(url: str) -> str | None:
     return m.group(1) if m else None
 
 
-def _get_vinted_session() -> requests.Session:
-    session = requests.Session()
-    session.headers.update(HEADERS_VINTED_HOME)
-    r = session.get(VINTED_HOME, timeout=15)
-    if r.status_code != 200:
-        raise RuntimeError(f"Vinted home returned {r.status_code}")
-    session.headers.update(HEADERS_VINTED_API)
-    return session
-
-
-def _check_vinted(session: requests.Session, url: str) -> tuple[bool, str]:
+def _check_vinted(url: str) -> tuple[bool, str]:
     """
     Ritorna (available: bool, reason: str).
+
+    Fetcha la pagina pubblica dell'annuncio (no cookie, no API).
+    Vinted usa Next.js App Router e inietta i dati item via:
+        self.__next_f.push([1, "...{\"is_closed\":true,...}..."])
+
+    Campi chiave nel sorgente HTML:
+        is_closed           = true  → venduto o rimosso
+        item_closing_action = "sold" | "removed"
+        is_reserved         = true  → riservato
     """
-    item_id = _extract_item_id_vinted(url)
-    if not item_id:
-        return True, "url_non_parsabile"
-
     try:
-        r = session.get(f"{VINTED_ITEM_API}/{item_id}", timeout=20)
+        r = requests.get(url, headers=HEADERS_VINTED_HOME, timeout=25)
 
-        if r.status_code == 404:
-            return False, "http_404"
-        if r.status_code == 401:
-            raise RuntimeError("Vinted session expired")
+        if r.status_code in (404, 410):
+            return False, f"http_{r.status_code}"
         if r.status_code != 200:
             return True, f"http_{r.status_code}_transitorio"
 
-        data = r.json()
-        item = data.get("item", {})
+        html = r.text
 
-        if not item:
-            return False, "item_vuoto"
+        # is_closed: true → venduto o rimosso
+        if '"is_closed":true' in html:
+            if '"item_closing_action":"sold"' in html:
+                return False, "is_closed_sold"
+            if '"item_closing_action":"removed"' in html:
+                return False, "is_closed_removed"
+            return False, "is_closed"
 
-        can_be_sold = item.get("can_be_sold")
-        if can_be_sold is False:
-            return False, "can_be_sold_false"
-
-        status = str(item.get("status", "")).lower()
-        if status in ("sold", "reserved", "hidden", "disabled"):
-            return False, f"status_{status}"
+        # is_reserved: true → riservato per altro acquirente
+        if '"is_reserved":true' in html:
+            return False, "is_reserved"
 
         return True, "disponibile"
 
-    except RuntimeError:
-        raise
     except requests.exceptions.Timeout:
         return True, "timeout_transitorio"
     except Exception as e:
@@ -333,51 +318,29 @@ def _run_check_job() -> dict:
         time.sleep(1.5)
 
     # ── Vinted ──
-    if vinted_records:
+    for rec in vinted_records:
+        url    = rec.get("url", "")
+        rec_id = rec["id"]
+        if not url:
+            continue
         try:
-            session = _get_vinted_session()
+            available, _ = _check_vinted(url)
         except Exception as e:
-            print(f"[checker] Vinted session failed: {e}")
-            errors += len(vinted_records)
-            return {
-                "status": "partial",
-                "checked": checked_count,
-                "sold": sold_count,
-                "errors": errors,
-                "note": "Vinted session failed — Subito completato",
-            }
-
-        for rec in vinted_records:
-            url    = rec.get("url", "")
-            rec_id = rec["id"]
-            if not url:
-                continue
-            try:
-                available, _ = _check_vinted(session, url)
-            except RuntimeError:
-                try:
-                    session   = _get_vinted_session()
-                    available, _ = _check_vinted(session, url)
-                except Exception as e2:
-                    print(f"[checker] Vinted session refresh failed: {e2}")
-                    errors += 1
-                    continue
-            except Exception as e:
-                print(f"[checker] Vinted error id={rec_id}: {e}")
-                errors += 1
-                supabase.table("scan_results").update({"last_checked_at": now}).eq("id", rec_id).execute()
-                time.sleep(0.5)
-                continue
-
-            update = {"last_checked_at": now}
-            if not available:
-                update["is_sold"] = True
-                update["sold_at"] = now
-                sold_count += 1
-
-            supabase.table("scan_results").update(update).eq("id", rec_id).execute()
-            checked_count += 1
+            print(f"[checker] Vinted error id={rec_id}: {e}")
+            errors += 1
+            supabase.table("scan_results").update({"last_checked_at": now}).eq("id", rec_id).execute()
             time.sleep(0.5)
+            continue
+
+        update = {"last_checked_at": now}
+        if not available:
+            update["is_sold"] = True
+            update["sold_at"] = now
+            sold_count += 1
+
+        supabase.table("scan_results").update(update).eq("id", rec_id).execute()
+        checked_count += 1
+        time.sleep(0.5)
 
     return {
         "status":  "ok",
@@ -407,8 +370,7 @@ def _run_test_job(
 ) -> dict:
     """
     Verifica `limit` annunci e ritorna il dettaglio record per record.
-    Se dry_run=True non scrive nulla in DB — utile per validare la logica
-    prima del lancio in produzione.
+    Se dry_run=True non scrive nulla in DB.
     """
     supabase = _get_supabase()
     now = _now()
@@ -416,10 +378,10 @@ def _run_test_job(
     records = _fetch_batch(supabase, limit=limit, source_filter=source_filter)
     if not records:
         return {
-            "status":   "ok",
-            "dry_run":  dry_run,
-            "message":  "Nessun annuncio trovato con i filtri indicati",
-            "results":  [],
+            "status":  "ok",
+            "dry_run": dry_run,
+            "message": "Nessun annuncio trovato con i filtri indicati",
+            "results": [],
         }
 
     subito_records = [r for r in records if "subito" in r.get("source", "").lower()]
@@ -427,27 +389,28 @@ def _run_test_job(
 
     detail: list[dict] = []
 
+    def _make_entry(rec: dict) -> dict:
+        return {
+            "id":          rec["id"],
+            "source":      rec.get("source"),
+            "keyword":     rec.get("keyword"),
+            "title":       rec.get("title"),
+            "price_value": rec.get("price_value"),
+            "score":       rec.get("score"),
+            "url":         rec.get("url", ""),
+            "available":   None,
+            "reason":      None,
+            "action":      "skip — url vuoto",
+            "dry_run":     dry_run,
+        }
+
     # ── Subito ──
     for rec in subito_records:
-        url    = rec.get("url", "")
-        rec_id = rec["id"]
-        entry  = {
-            "id":           rec_id,
-            "source":       rec.get("source"),
-            "keyword":      rec.get("keyword"),
-            "title":        rec.get("title"),
-            "price_value":  rec.get("price_value"),
-            "score":        rec.get("score"),
-            "url":          url,
-            "available":    None,
-            "reason":       None,
-            "action":       "skip — url vuoto",
-            "dry_run":      dry_run,
-        }
+        entry = _make_entry(rec)
+        url   = entry["url"]
         if not url:
             detail.append(entry)
             continue
-
         try:
             available, reason = _check_subito(url)
         except Exception as e:
@@ -465,7 +428,7 @@ def _run_test_job(
             if not available:
                 update["is_sold"] = True
                 update["sold_at"] = now
-            supabase.table("scan_results").update(update).eq("id", rec_id).execute()
+            supabase.table("scan_results").update(update).eq("id", rec["id"]).execute()
             entry["action"] = "scritto in DB"
         else:
             entry["action"] = "marcato sold [DRY RUN]" if not available else "nessuna modifica [DRY RUN]"
@@ -474,95 +437,50 @@ def _run_test_job(
         time.sleep(1.5)
 
     # ── Vinted ──
-    if vinted_records:
+    for rec in vinted_records:
+        entry = _make_entry(rec)
+        url   = entry["url"]
+        if not url:
+            detail.append(entry)
+            continue
         try:
-            session = _get_vinted_session()
+            available, reason = _check_vinted(url)
         except Exception as e:
-            for rec in vinted_records:
-                detail.append({
-                    "id":      rec["id"],
-                    "source":  rec.get("source"),
-                    "keyword": rec.get("keyword"),
-                    "title":   rec.get("title"),
-                    "url":     rec.get("url"),
-                    "available": None,
-                    "reason":  f"session_failed_{str(e)[:60]}",
-                    "action":  "skip — sessione Vinted non ottenuta",
-                    "dry_run": dry_run,
-                })
-            # Restituiamo quello che abbiamo
-            return _build_test_response(detail, dry_run, source_filter)
-
-        for rec in vinted_records:
-            url    = rec.get("url", "")
-            rec_id = rec["id"]
-            entry  = {
-                "id":          rec_id,
-                "source":      rec.get("source"),
-                "keyword":     rec.get("keyword"),
-                "title":       rec.get("title"),
-                "price_value": rec.get("price_value"),
-                "score":       rec.get("score"),
-                "url":         url,
-                "available":   None,
-                "reason":      None,
-                "action":      "skip — url vuoto",
-                "dry_run":     dry_run,
-            }
-            if not url:
-                detail.append(entry)
-                continue
-
-            try:
-                available, reason = _check_vinted(session, url)
-            except RuntimeError:
-                try:
-                    session       = _get_vinted_session()
-                    available, reason = _check_vinted(session, url)
-                except Exception as e2:
-                    entry["reason"] = f"session_refresh_failed_{str(e2)[:60]}"
-                    entry["action"] = "skip — sessione non rinnovata"
-                    detail.append(entry)
-                    continue
-            except Exception as e:
-                entry["reason"] = f"errore_{str(e)[:60]}"
-                entry["action"] = "skip — errore"
-                detail.append(entry)
-                time.sleep(0.5)
-                continue
-
-            entry["available"] = available
-            entry["reason"]    = reason
-
-            if not dry_run:
-                update = {"last_checked_at": now}
-                if not available:
-                    update["is_sold"] = True
-                    update["sold_at"] = now
-                supabase.table("scan_results").update(update).eq("id", rec_id).execute()
-                entry["action"] = "scritto in DB"
-            else:
-                entry["action"] = "marcato sold [DRY RUN]" if not available else "nessuna modifica [DRY RUN]"
-
+            entry["reason"] = f"errore_{str(e)[:60]}"
+            entry["action"] = "skip — errore"
             detail.append(entry)
             time.sleep(0.5)
+            continue
 
-    return _build_test_response(detail, dry_run, source_filter)
+        entry["available"] = available
+        entry["reason"]    = reason
 
+        if not dry_run:
+            update = {"last_checked_at": now}
+            if not available:
+                update["is_sold"] = True
+                update["sold_at"] = now
+            supabase.table("scan_results").update(update).eq("id", rec["id"]).execute()
+            entry["action"] = "scritto in DB"
+        else:
+            entry["action"] = "marcato sold [DRY RUN]" if not available else "nessuna modifica [DRY RUN]"
 
-def _build_test_response(detail: list[dict], dry_run: bool, source_filter: str | None) -> dict:
+        detail.append(entry)
+        time.sleep(0.5)
+
     sold_preview  = [d for d in detail if d.get("available") is False]
     ok_preview    = [d for d in detail if d.get("available") is True]
     errors_detail = [d for d in detail if d.get("available") is None]
+
     return {
-        "status":        "ok",
-        "dry_run":       dry_run,
-        "source_filter": source_filter or "all",
-        "checked":       len(detail),
-        "would_mark_sold": len(sold_preview),
-        "available":     len(ok_preview),
-        "errors":        len(errors_detail),
-        "results":       detail,
+        "status":            "ok",
+        "dry_run":           dry_run,
+        "source_filter":     source_filter or "all",
+        "checked":           len(detail),
+        "would_mark_sold":   len(sold_preview),
+        "available":         len(ok_preview),
+        "errors":            len(errors_detail),
+        "results":           detail,
     }
 
 
@@ -573,10 +491,8 @@ async def run_availability_test(
 ) -> dict:
     """Entry point per l'endpoint /test/check-availability."""
     source_filter = None if source == "all" else source
-    limit = max(1, min(limit, 20))  # cap 1–20
+    limit = max(1, min(limit, 20))
     try:
-        return await asyncio.to_thread(
-            _run_test_job, limit, source_filter, dry_run
-        )
+        return await asyncio.to_thread(_run_test_job, limit, source_filter, dry_run)
     except Exception as e:
         return {"status": "error", "detail": str(e)}
