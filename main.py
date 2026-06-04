@@ -16,6 +16,7 @@ from app.scraper.vinted_defective_scanner import run_vinted_defective_scan
 from app.scraper.notifier_defective       import run_defective_notify_job
 from app.scraper.vinted_collector_scanner import run_vinted_collector_scan
 from app.scraper.notifier_collector       import run_collector_notify_job
+from app.scraper.availability_checker import run_availability_check
 from app.scraper.content_generator        import run_content_job
 
 app = FastAPI(title="Lepefy Backend API")
@@ -117,7 +118,16 @@ async def cron_content(secret: str = ""):
     if secret != os.getenv("CRON_SECRET"):
         return {"error": "unauthorized"}
     return run_content_job()
-    
+
+@app.get("/cron/check-availability")
+async def cron_check_availability(secret: str = ""):
+    """
+    Verifica disponibilità annunci in scan_results partendo dai record DB.
+    Marca is_sold=true gli annunci rimossi/venduti su Subito e Vinted.
+    """
+    if secret != os.getenv("CRON_SECRET"):
+        return {"error": "unauthorized"}
+    return await run_availability_check()
 # ---------------------------------------------------------------------------
 # Market scanner
 # ---------------------------------------------------------------------------
