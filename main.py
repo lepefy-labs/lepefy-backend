@@ -16,7 +16,7 @@ from app.scraper.vinted_defective_scanner import run_vinted_defective_scan
 from app.scraper.notifier_defective       import run_defective_notify_job
 from app.scraper.vinted_collector_scanner import run_vinted_collector_scan
 from app.scraper.notifier_collector       import run_collector_notify_job
-from app.scraper.availability_checker import run_availability_check
+from app.scraper.availability_checker     import run_availability_check, run_availability_test
 from app.scraper.content_generator        import run_content_job
 
 app = FastAPI(title="Lepefy Backend API")
@@ -119,15 +119,43 @@ async def cron_content(secret: str = ""):
         return {"error": "unauthorized"}
     return run_content_job()
 
+# ── Endpoint produzione 
 @app.get("/cron/check-availability")
 async def cron_check_availability(secret: str = ""):
     """
     Verifica disponibilità annunci in scan_results partendo dai record DB.
     Marca is_sold=true gli annunci rimossi/venduti su Subito e Vinted.
+    Batch: 100 record/run, priorità: notificati → recenti → backlog.
     """
     if secret != os.getenv("CRON_SECRET"):
         return {"error": "unauthorized"}
     return await run_availability_check()
+ 
+ 
+# ── Endpoint test / dry-run ──
+@app.get("/test/check-availability")
+async def test_check_availability(
+    secret:   str  = "",
+    limit:    int  = 5,
+    source:   str  = "all",
+    dry_run:  bool = True,
+):
+    """
+    Verifica `limit` annunci (max 20) e ritorna il dettaglio record per record.
+ 
+    Parametri:
+      limit    — quanti annunci controllare (1–20, default 5)
+      source   — "subito", "vinted", "all" (default "all")
+      dry_run  — true: solo log, nessuna scrittura DB (default true)
+                 false: scrive is_sold/sold_at/last_checked_at
+ 
+    Esempio:
+      GET /test/check-availability?secret=TOKEN&limit=5&source=subito&dry_run=true
+    """
+    if secret != os.getenv("CRON_SECRET"):
+        return {"error": "unauthorized"}
+    return await run_availability_test(limit=limit, source=source, dry_run=dry_run)
+    
 # ---------------------------------------------------------------------------
 # Market scanner
 # ---------------------------------------------------------------------------
