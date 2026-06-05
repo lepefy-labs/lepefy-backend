@@ -285,7 +285,7 @@ def _scan_collector_keyword(
             continue
         candidates.append(item)
 
-    truly_new = [c for c in candidates if c.get("url") not in existing]
+    truly_new = [c for c in candidates if c.get("url") not in existing][:15]
     in_db     = [c for c in candidates if c.get("url") in existing]
 
     user_ids = list({
