@@ -181,7 +181,7 @@ async def cron_content(secret: str = ""):
     """
     if secret != os.getenv("CRON_SECRET"):
         return {"error": "unauthorized"}
-    return await run_content_job()
+    return run_content_job()
 
 
 # ---------------------------------------------------------------------------
