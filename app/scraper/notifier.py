@@ -9,7 +9,8 @@ BREVO_API_KEY        = os.getenv("BREVO_API_KEY")
 EMAIL_CONTACT        = os.getenv("EMAIL_CONTACT", "ciao@lepefy.it")
 EMAIL_FROM           = os.getenv("EMAIL_FROM", "noreply@lepefy.com")
 EMAIL_FROM_NAME      = os.getenv("EMAIL_FROM_NAME", "Lepefy")
-BACKEND_URL          = os.getenv("BACKEND_URL", "https://api.lepefy.com")
+BACKEND_URL          = "https://" + os.getenv("RAILWAY_PUBLIC_DOMAIN", "lepefy-backend-production.up.railway.app")
+
 
 
 def _get_supabase() -> Client:
