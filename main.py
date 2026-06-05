@@ -1,6 +1,6 @@
 import os
 import hashlib
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, BackgroundTasks
 from app.scraper.scanner          import run_lepe_scan, run_scan_and_save
 from app.scraper.scorer           import run_score_job
 from app.scraper.notifier         import run_notify_job
@@ -16,8 +16,8 @@ from app.scraper.vinted_defective_scanner import run_vinted_defective_scan
 from app.scraper.notifier_defective       import run_defective_notify_job
 from app.scraper.vinted_collector_scanner import run_vinted_collector_scan
 from app.scraper.notifier_collector       import run_collector_notify_job
-from app.scraper.availability_checker     import run_availability_check, run_availability_test
 from app.scraper.content_generator        import run_content_job
+from app.scraper.availability_checker     import run_availability_check, run_availability_test
 
 app = FastAPI(title="Lepefy Backend API")
 
@@ -55,6 +55,7 @@ async def cron_scan(secret: str = ""):
         return {"error": "unauthorized"}
     return await run_scan_and_save()
 
+
 @app.get("/cron/vinted-scan")
 async def cron_vinted_scan(secret: str = ""):
     """
@@ -65,16 +66,18 @@ async def cron_vinted_scan(secret: str = ""):
         return {"error": "unauthorized"}
     return await run_vinted_scan()
 
+
 @app.get("/cron/vinted-defective-scan")
 async def cron_vinted_defective_scan(secret: str = ""):
     if secret != os.getenv("CRON_SECRET"):
         return {"error": "unauthorized"}
     return await run_vinted_defective_scan()
 
+
 @app.get("/cron/score")
 async def cron_score(secret: str = ""):
     """
-    Legge annunci con scored=false, chiama eBay + Claude Haiku,
+    Legge annunci con scored=false, chiama Claude Haiku,
     aggiorna score e margine in scan_results.
     """
     if secret != os.getenv("CRON_SECRET"):
@@ -85,77 +88,102 @@ async def cron_score(secret: str = ""):
 @app.get("/cron/notify")
 async def cron_notify(secret: str = ""):
     """
-    Per ogni subscription attiva, invia i deal scored=true
-    non ancora notificati che rientrano nella fascia prezzo.
+    Notifica flipper (Subito + Vinted) con annunci score >= 7.
     """
     if secret != os.getenv("CRON_SECRET"):
         return {"error": "unauthorized"}
     return await run_notify_job()
 
+
 @app.get("/cron/notify-defective")
 async def cron_notify_defective(secret: str = ""):
+    """
+    Notifica riparatori con annunci difettosi non ancora notificati.
+    """
     if secret != os.getenv("CRON_SECRET"):
         return {"error": "unauthorized"}
     return await run_defective_notify_job()
 
+
 @app.get("/cron/scan-vinted-collector")
 async def cron_scan_vinted_collector(secret: str = ""):
+    """
+    Fetch Vinted per keyword collezionisti (only_collector=true).
+    """
     if secret != os.getenv("CRON_SECRET"):
         return {"error": "unauthorized"}
     return await run_vinted_collector_scan()
 
+
 @app.get("/cron/notify-collector")
 async def cron_notify_collector(secret: str = ""):
+    """
+    Notifica collezionisti con annunci non ancora notificati.
+    """
     if secret != os.getenv("CRON_SECRET"):
         return {"error": "unauthorized"}
     return await run_collector_notify_job()
 
-@app.get("/cron/content")
-async def cron_content(secret: str = ""):
-    """
-    Genera contenuti social per i top deal e li invia via email.
-    """
-    if secret != os.getenv("CRON_SECRET"):
-        return {"error": "unauthorized"}
-    return run_content_job()
 
-# ── Endpoint produzione 
+# ---------------------------------------------------------------------------
+# Availability checker
+# ---------------------------------------------------------------------------
+
 @app.get("/cron/check-availability")
-async def cron_check_availability(secret: str = ""):
+async def cron_check_availability(
+    secret: str = "",
+    background_tasks: BackgroundTasks = None,
+):
     """
     Verifica disponibilità annunci in scan_results partendo dai record DB.
     Marca is_sold=true gli annunci rimossi/venduti su Subito e Vinted.
-    Batch: 100 record/run, priorità: notificati → recenti → backlog.
+    Ritorna 202 immediatamente — il job gira in background per evitare
+    il timeout HTTP di Railway (batch da 100 URL può durare 5+ minuti).
     """
     if secret != os.getenv("CRON_SECRET"):
         return {"error": "unauthorized"}
-    return await run_availability_check()
- 
- 
-# ── Endpoint test / dry-run ──
+    background_tasks.add_task(run_availability_check)
+    return {"status": "accepted", "message": "Availability check avviato in background"}
+
+
 @app.get("/test/check-availability")
 async def test_check_availability(
-    secret:   str  = "",
-    limit:    int  = 5,
-    source:   str  = "all",
-    dry_run:  bool = True,
+    secret:  str  = "",
+    limit:   int  = 5,
+    source:  str  = "all",
+    dry_run: bool = True,
 ):
     """
     Verifica `limit` annunci (max 20) e ritorna il dettaglio record per record.
- 
+
     Parametri:
       limit    — quanti annunci controllare (1–20, default 5)
       source   — "subito", "vinted", "all" (default "all")
       dry_run  — true: solo log, nessuna scrittura DB (default true)
                  false: scrive is_sold/sold_at/last_checked_at
- 
+
     Esempio:
       GET /test/check-availability?secret=TOKEN&limit=5&source=subito&dry_run=true
     """
     if secret != os.getenv("CRON_SECRET"):
         return {"error": "unauthorized"}
     return await run_availability_test(limit=limit, source=source, dry_run=dry_run)
-    
+
+
+# ---------------------------------------------------------------------------
+# Content generator
+# ---------------------------------------------------------------------------
+
+@app.get("/cron/content")
+async def cron_content(secret: str = ""):
+    """
+    Genera contenuti social dai top deal scorati.
+    """
+    if secret != os.getenv("CRON_SECRET"):
+        return {"error": "unauthorized"}
+    return await run_content_job()
+
+
 # ---------------------------------------------------------------------------
 # Market scanner
 # ---------------------------------------------------------------------------
@@ -176,18 +204,18 @@ async def cron_market_scan(secret: str = ""):
 
 @app.get("/market/price-stats")
 async def market_price_stats(
-    modello: str,
+    modello:    str,
     condizione: str | None = None,
-    giorni: int = 90,
+    giorni:     int = 90,
 ):
     return get_price_stats(modello=modello, condizione=condizione, giorni=giorni)
 
 
 @app.get("/market/time-to-sell")
 async def market_time_to_sell(
-    modello: str,
+    modello:    str,
     condizione: str | None = None,
-    giorni: int = 180,
+    giorni:     int = 180,
 ):
     return get_time_to_sell(modello=modello, condizione=condizione, giorni=giorni)
 
@@ -195,19 +223,19 @@ async def market_time_to_sell(
 @app.get("/market/price-trend")
 async def market_price_trend(
     modello: str,
-    giorni: int = 90,
-    bucket: str = "week",
+    giorni:  int = 90,
+    bucket:  str = "week",
 ):
     return get_price_trend(modello=modello, giorni=giorni, bucket=bucket)
 
 
 @app.get("/market/active")
 async def market_active_listings(
-    categoria: str | None = None,
-    marca: str | None = None,
-    modello: str | None = None,
+    categoria:  str | None = None,
+    marca:      str | None = None,
+    modello:    str | None = None,
     condizione: str | None = None,
-    limit: int = 50,
+    limit:      int = 50,
 ):
     return get_active_listings(
         categoria=categoria,
@@ -241,46 +269,3 @@ async def ebay_account_deletion_challenge(challenge_code: str = ""):
 async def ebay_account_deletion(request: Request):
     """Riceve notifiche di cancellazione account eBay (GDPR)."""
     return {"ack": "Success"}
-
-
-# ---------------------------------------------------------------------------
-# Debug (da rimuovere in produzione)
-# ---------------------------------------------------------------------------
-
-from test_vinted import run_tests
-
-@app.get("/test-vinted")
-async def test_vinted_endpoint():
-    return run_tests()
-
-@app.get("/debug/scraperapi")
-async def debug_scraperapi():
-    import httpx
-    api_key = os.getenv("SCRAPERAPI_KEY")
-    r = httpx.get(f"http://api.scraperapi.com/account?api_key={api_key}", timeout=10)
-    return r.json()
-
-
-@app.get("/debug/static")
-async def debug_static():
-    import httpx
-    api_key = os.getenv("SCRAPERAPI_KEY")
-    r = httpx.get(
-        "http://api.scraperapi.com/",
-        params={"api_key": api_key,
-                "url": "https://www.subito.it/annunci-italia/vendita/usato/?q=ThinkPad"},
-        timeout=30,
-    )
-    html = r.text
-    marker = "__NEXT_DATA__"
-    found = marker in html
-    preview = ""
-    if found:
-        start = html.find(marker)
-        preview = html[start: start + 200]
-    return {
-        "http_status": r.status_code,
-        "next_data_found": found,
-        "preview": preview,
-        "html_length": len(html),
-    }
