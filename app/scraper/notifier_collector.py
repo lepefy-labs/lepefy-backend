@@ -32,6 +32,7 @@ BREVO_API_KEY        = os.getenv("BREVO_API_KEY")
 EMAIL_CONTACT        = os.getenv("EMAIL_CONTACT", "ciao@lepefy.it")
 EMAIL_FROM           = os.getenv("EMAIL_FROM", "noreply@lepefy.it")
 EMAIL_FROM_NAME      = os.getenv("EMAIL_FROM_NAME", "Lepefy")
+BACKEND_URL          = os.getenv("BACKEND_URL", "https://api.lepefy.com")
 
 MAX_DEALS = 5
 
@@ -64,7 +65,7 @@ def _condition_badge(condition: str) -> str:
     )
 
 
-def _build_collector_email_html(deals: list[dict], keyword: str) -> str:
+def _build_collector_email_html(deals: list[dict], keyword: str, token: str = "") -> str:
     cards = ""
     for d in deals:
         title     = d.get("title", "N/D")
@@ -155,6 +156,11 @@ def _build_collector_email_html(deals: list[dict], keyword: str) -> str:
           {body_preview}
         </div>'''
 
+    unsubscribe_html = (
+        f' &nbsp;·&nbsp; <a href="{BACKEND_URL}/unsubscribe?token={token}" style="color:#9ca3af;">Disiscriviti</a>'
+        if token else ""
+    )
+
     return f"""<!DOCTYPE html>
 <html>
 <head><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
@@ -197,7 +203,7 @@ def _build_collector_email_html(deals: list[dict], keyword: str) -> str:
                 border-radius:0 0 8px 8px;padding:16px 24px;">
       <p style="color:#9ca3af;font-size:11px;margin:0;">
         Stai ricevendo questa email perché sei iscritto a Lepefy.<br>
-        <a href="mailto:{EMAIL_CONTACT}" style="color:#9ca3af;">Contattaci</a> per disdire.
+        <a href="mailto:{EMAIL_CONTACT}" style="color:#9ca3af;">Contattaci</a>{unsubscribe_html}
       </p>
     </div>
   </div>
@@ -262,6 +268,8 @@ def _run_collector_notify_job() -> dict:
 
     for email, user_subs in by_email.items():
         sub_ids = [sub["id"] for sub in user_subs]
+        # Tutti i sub dello stesso utente condividono la stessa email → stesso token
+        token = user_subs[0].get("unsubscribe_token", "")
 
         # Deal già notificati a questo utente
         notified_response = (
@@ -314,7 +322,7 @@ def _run_collector_notify_job() -> dict:
         )[:MAX_DEALS]
 
         selected_deals = [d for d, _ in all_deals]
-        html    = _build_collector_email_html(selected_deals, primary_keyword)
+        html    = _build_collector_email_html(selected_deals, primary_keyword, token=token)
         sources = sorted({sub.get("source") for sub in user_subs if sub.get("source")})
         source_suffix = f" su {' e '.join(sources)}" if sources else ""
         subject = f"🏷️ Lepefy — {len(selected_deals)} articoli per la tua collezione{source_suffix}"
