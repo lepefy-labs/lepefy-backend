@@ -21,6 +21,9 @@ from app.scraper.availability_checker     import run_availability_check, run_ava
 
 app = FastAPI(title="Lepefy Backend API")
 
+from app.routers.unsubscribe import router as unsubscribe_router
+   app.include_router(unsubscribe_router)
+
 
 # ---------------------------------------------------------------------------
 # Root
