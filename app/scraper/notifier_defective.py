@@ -25,6 +25,7 @@ BREVO_API_KEY        = os.getenv("BREVO_API_KEY")
 EMAIL_CONTACT        = os.getenv("EMAIL_CONTACT", "ciao@lepefy.it")
 EMAIL_FROM           = os.getenv("EMAIL_FROM", "noreply@lepefy.it")
 EMAIL_FROM_NAME      = os.getenv("EMAIL_FROM_NAME", "Lepefy")
+BACKEND_URL          = os.getenv("BACKEND_URL", "https://api.lepefy.com")
 
 DEFECTIVE_CONDITION  = "Non del tutto funzionante"
 MAX_DEALS            = 5
@@ -55,7 +56,7 @@ def _condition_badge(condition: str) -> str:
     )
 
 
-def _build_defective_email_html(deals: list[dict]) -> str:
+def _build_defective_email_html(deals: list[dict], token: str = "") -> str:
     cards = ""
     for d in deals:
         title     = d.get("title", "N/D")
@@ -77,7 +78,7 @@ def _build_defective_email_html(deals: list[dict]) -> str:
             fee   = float(vinted_match.group(3))
             price_display = (
                 f'<div style="font-size:17px;font-weight:500;'
-                f'color:var(--text,#1a1a1a);">{total:.2f} €</div>'
+                f'color:#1a1a1a;">{total:.2f} €</div>'
                 f'<div style="font-size:11px;color:#9ca3af;">'
                 f'prodotto {prod:.2f} € + fee {fee:.2f} €</div>'
             )
@@ -132,6 +133,11 @@ def _build_defective_email_html(deals: list[dict]) -> str:
           {body_preview}
         </div>'''
 
+    unsubscribe_html = (
+        f' &nbsp;·&nbsp; <a href="{BACKEND_URL}/unsubscribe?token={token}" style="color:#9ca3af;">Disiscriviti</a>'
+        if token else ""
+    )
+
     return f"""<!DOCTYPE html>
 <html>
 <head><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
@@ -142,30 +148,29 @@ def _build_defective_email_html(deals: list[dict]) -> str:
       <img src="https://osonphsavryefwmlhkyv.supabase.co/storage/v1/object/public/assets/lepefy-logo-email.png"
            alt="Lepefy" height="32" style="display:block;" />
       <div style="color:#9ca3af;font-size:13px;margin-top:6px;">
-        articoli da riparare trovati su Vinted
+        annunci da riparare
       </div>
     </div>
     <div style="background:#f9fafb;padding:16px 24px;
                 border-left:1px solid #e5e7eb;border-right:1px solid #e5e7eb;">
       <p style="color:#374151;font-size:14px;margin:0;">
-        Abbiamo trovato <strong>{len(deals)} articoli</strong>
-        in condizioni Discrete o Non del tutto funzionante
-        nella tua fascia prezzo:
+        Abbiamo trovato <strong>{len(deals)} articoli difettosi</strong>
+        nella tua fascia di prezzo su Vinted:
       </p>
     </div>
     <div style="padding:12px 0;">{cards}</div>
-    <div style="background:#f0fdf4;border:1px solid #bbf7d0;
+    <div style="background:#fef3c7;border:1px solid #fde68a;
                 border-radius:8px;padding:16px 20px;margin-bottom:10px;
                 text-align:center;">
-      <p style="color:#166534;font-size:13px;margin:0 0 4px;">
-        🔧 Altri articoli difettosi e occasioni per riparatori su Lepefy.
+      <p style="color:#92400e;font-size:13px;margin:0 0 4px;">
+        🔧 Altri articoli da riparare su Lepefy.
       </p>
-      <p style="color:#16a34a;font-size:11px;margin:0 0 10px;">
+      <p style="color:#b45309;font-size:11px;margin:0 0 10px;">
         Sul sito i deal pubblici arrivano con 12 ore di ritardo —
         tu li hai già visti per primo.
       </p>
       <a href="https://www.lepefy.com/deals"
-         style="display:inline-block;background:#15803d;color:#ffffff;
+         style="display:inline-block;background:#d97706;color:#ffffff;
                 padding:9px 20px;border-radius:6px;font-size:13px;
                 font-weight:600;text-decoration:none;">
         Esplora i deal →
@@ -174,8 +179,8 @@ def _build_defective_email_html(deals: list[dict]) -> str:
     <div style="background:#f9fafb;border:1px solid #e5e7eb;
                 border-radius:0 0 8px 8px;padding:16px 24px;">
       <p style="color:#9ca3af;font-size:11px;margin:0;">
-        Stai ricevendo questa email perché sei abbonato a Lepefy.<br>
-        <a href="mailto:{EMAIL_CONTACT}" style="color:#9ca3af;">Contattaci</a> per disdire.
+        Stai ricevendo questa email perché sei iscritto a Lepefy.<br>
+        <a href="mailto:{EMAIL_CONTACT}" style="color:#9ca3af;">Contattaci</a>{unsubscribe_html}
       </p>
     </div>
   </div>
@@ -240,6 +245,8 @@ def _run_defective_notify_job() -> dict:
 
     for email, user_subs in by_email.items():
         only_italy = any(sub.get("only_italy", True) for sub in user_subs)
+        # Tutti i sub dello stesso utente condividono la stessa email → stesso token
+        token = user_subs[0].get("unsubscribe_token", "")
 
         # Deal già notificati a questo utente (su tutte le sue subscription)
         sub_ids = [sub["id"] for sub in user_subs]
@@ -279,7 +286,6 @@ def _run_defective_notify_job() -> dict:
                     continue
                 if only_italy and deal.get("country") != "IT":
                     continue
-                # Se lo stesso deal è coperto da più subscription, tieni la prima
                 if deal_id not in deal_map:
                     deal_map[deal_id] = (deal, sub["id"])
 
@@ -294,7 +300,7 @@ def _run_defective_notify_job() -> dict:
         )[:MAX_DEALS]
 
         selected_deals = [d for d, _ in all_deals]
-        html    = _build_defective_email_html(selected_deals)
+        html    = _build_defective_email_html(selected_deals, token=token)
         subject = f"🔧 Lepefy — {len(selected_deals)} articoli da riparare su Vinted"
 
         try:
