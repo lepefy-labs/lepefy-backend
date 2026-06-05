@@ -42,6 +42,7 @@ ALLOWED_COUNTRIES = {"IT", "FR"}
 # Applicate case-insensitive prima del salvataggio in scan_results.
 TITLE_BLACKLIST = {
     "zaino", "borsa", "orologio", "cinturino", "occhiali", "profumo",
+    "borsone", "dictaphone", "dittafono", "registratore", "slicer",
     "scarpe", "cappello", "giacca", "pantaloni", "gonna", "vestito",
     "felpa", "maglione", "camicia", "stampa", "poster", "libro",
     "manuale", "custodia", "cover", "skin",
