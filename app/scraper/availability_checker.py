@@ -188,6 +188,17 @@ def _check_subito(url: str) -> tuple[bool, str]:
         if "annuncio non trovato" in html_lower or "annuncio non disponibile" in html_lower:
             return False, "testo_non_trovato"
 
+        # Segnali HTML venduto — presenti quando Subito serve la pagina
+        # classica (senza Next.js) per annunci conclusi
+        sold_signals = (
+            "item-sold-badge" in html,
+            "sold-box" in html,
+            "no-item-available-price" in html,
+            "ha concluso la trattativa" in html_lower,
+        )
+        if any(sold_signals):
+            return False, "html_sold_badge"
+
         soup = BeautifulSoup(html, "html.parser")
         tag = soup.find("script", id="__NEXT_DATA__")
         if not tag:
