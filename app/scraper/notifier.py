@@ -9,13 +9,14 @@ BREVO_API_KEY        = os.getenv("BREVO_API_KEY")
 EMAIL_CONTACT        = os.getenv("EMAIL_CONTACT", "ciao@lepefy.it")
 EMAIL_FROM           = os.getenv("EMAIL_FROM", "noreply@lepefy.com")
 EMAIL_FROM_NAME      = os.getenv("EMAIL_FROM_NAME", "Lepefy")
+BACKEND_URL          = os.getenv("BACKEND_URL", "https://api.lepefy.com")
 
 
 def _get_supabase() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 
-def _build_email_html(deals: list[dict]) -> str:
+def _build_email_html(deals: list[dict], token: str = "") -> str:
     cards = ""
     for d in deals:
         score = d.get("score")
@@ -32,18 +33,15 @@ def _build_email_html(deals: list[dict]) -> str:
         margine_html = f"+€{margine}" if margine else "N/D"
         margine_color = "#16a34a" if margine else "#9ca3af"
 
-        # Colore bottone per piattaforma
         btn_color = "#15803d" if source == "Vinted.it" else "#dc2626"
-        source_badge = "Vinted" if source == "Vinted.it" else "Subito"
 
-        # Formato prezzo: Vinted mostra prodotto + fee su due righe
         price_raw = d.get("price_raw", "N/D")
         import re as _re
         vinted_match = _re.search(r"prodotto[:\s]+([\d\.]+).*fee[:\s]+([\d\.]+)", price_raw or "", _re.IGNORECASE)
         if vinted_match:
             prod = float(vinted_match.group(1))
             fee = float(vinted_match.group(2))
-            price_display = f'''<div style="font-size:18px;font-weight:600;color:var(--text,#1a1a1a);">{prod:.2f} €</div>
+            price_display = f'''<div style="font-size:18px;font-weight:600;color:#1a1a1a;">{prod:.2f} €</div>
             <div style="font-size:11px;color:#9ca3af;">+ €{fee:.2f} fee Vinted</div>'''
         else:
             price_display = f'<div style="font-size:18px;font-weight:600;color:#1a1a1a;">{price_raw}</div>'
@@ -84,6 +82,11 @@ def _build_email_html(deals: list[dict]) -> str:
           {rischi_html}
         </div>'''
 
+    unsubscribe_html = (
+        f' &nbsp;·&nbsp; <a href="{BACKEND_URL}/unsubscribe?token={token}" style="color:#9ca3af;">Disiscriviti</a>'
+        if token else ""
+    )
+
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -117,8 +120,8 @@ def _build_email_html(deals: list[dict]) -> str:
     </div>
     <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:0 0 8px 8px;padding:16px 24px;">
       <p style="color:#9ca3af;font-size:11px;margin:0;">
-        Stai ricevendo questa email perchè sei abbonato a Lepefy Premium.<br>
-        <a href="mailto:{EMAIL_CONTACT}" style="color:#9ca3af;">Contattaci</a> per disdire.
+        Stai ricevendo questa email perché sei iscritto a Lepefy.<br>
+        <a href="mailto:{EMAIL_CONTACT}" style="color:#9ca3af;">Contattaci</a>{unsubscribe_html}
       </p>
     </div>
   </div>
@@ -176,6 +179,7 @@ def _run_notify_job() -> dict:
         min_price = sub.get("min_threshold", 0)
         max_price = sub["max_threshold"]
         only_italy = sub.get("only_italy", True)
+        token = sub.get("unsubscribe_token", "")
 
         # Deal già notificati a questo utente
         notified_response = (
@@ -240,7 +244,7 @@ def _run_notify_job() -> dict:
             results.append({"email": email, "keyword": keyword, "sent": 0})
             continue
 
-        html = _build_email_html(new_deals)
+        html = _build_email_html(new_deals, token=token)
         subject = f"🔍 Lepefy — {len(new_deals)} nuovi affari su {keyword}"
 
         try:
