@@ -164,8 +164,12 @@ def unsubscribe_execute(token: str = Query(...)):
     if not email:
         return _page_not_found()
 
+    from datetime import datetime, timezone
     supabase = _get_supabase()
-    supabase.table("subscriptions").update({"active": False}).eq("email", email).execute()
+    supabase.table("subscriptions").update({
+        "active": False,
+        "unsubscribed_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("email", email).execute()
 
     body = f"""
       <p>
