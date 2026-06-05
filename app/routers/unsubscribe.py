@@ -1,10 +1,9 @@
 """
-unsubscribe.py — Endpoint per disiscrizione via token.
+unsubscribe.py — Endpoint per disiscrizione via token con pagina di conferma.
 
-GET /unsubscribe?token=<uuid>
-
-Disattiva TUTTE le subscription associate all'email del token
-(unsubscribe globale per email, non per singola subscription).
+Flusso:
+    GET  /unsubscribe?token=<uuid>  → pagina di conferma (nessuna azione)
+    POST /unsubscribe?token=<uuid>  → disattivazione + pagina di successo
 
 Aggiungere questo router in main.py:
     from app.routers.unsubscribe import router as unsubscribe_router
@@ -26,7 +25,7 @@ def _get_supabase():
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 
-def _page(title: str, emoji: str, heading: str, body: str) -> str:
+def _page(title: str, emoji: str, heading: str, body_html: str) -> str:
     return f"""<!DOCTYPE html>
 <html lang="it">
 <head>
@@ -54,31 +53,58 @@ def _page(title: str, emoji: str, heading: str, body: str) -> str:
       text-align: center;
       box-shadow: 0 1px 6px rgba(0,0,0,.06);
     }}
-    .emoji {{ font-size: 3rem; margin-bottom: 1rem; }}
+    .emoji {{ font-size: 3rem; margin-bottom: 1rem; line-height: 1; }}
     h1 {{ font-size: 1.25rem; font-weight: 700; color: #111827; margin-bottom: 0.75rem; }}
-    p  {{ font-size: 0.875rem; color: #6b7280; line-height: 1.6; }}
-    a  {{ color: #2563eb; text-decoration: none; }}
+    p  {{ font-size: 0.875rem; color: #6b7280; line-height: 1.6; margin-bottom: 0.5rem; }}
+    .warning {{
+      background: #fef3c7;
+      border: 1px solid #fde68a;
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+      font-size: 0.8rem;
+      color: #92400e;
+      margin: 1.25rem 0;
+      line-height: 1.5;
+    }}
+    .btn-confirm {{
+      display: inline-block;
+      background: #dc2626;
+      color: #ffffff;
+      border: none;
+      border-radius: 8px;
+      padding: 0.75rem 1.75rem;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      text-decoration: none;
+      margin-top: 0.5rem;
+      width: 100%;
+    }}
+    .btn-confirm:hover {{ background: #b91c1c; }}
+    .btn-cancel {{
+      display: inline-block;
+      margin-top: 0.75rem;
+      font-size: 0.8rem;
+      color: #9ca3af;
+      text-decoration: none;
+    }}
+    .btn-cancel:hover {{ color: #6b7280; }}
+    a {{ color: #2563eb; text-decoration: none; }}
   </style>
 </head>
 <body>
   <div class="card">
     <div class="emoji">{emoji}</div>
     <h1>{heading}</h1>
-    <p>{body}</p>
+    {body_html}
   </div>
 </body>
 </html>"""
 
 
-@router.get("/unsubscribe", response_class=HTMLResponse, include_in_schema=False)
-def unsubscribe(token: str = Query(..., description="UUID token di disiscrizione")):
-    """
-    Disattiva tutte le subscription dell'email associata al token.
-    Risponde con una pagina HTML (nessun JSON — è un link da email).
-    """
+def _lookup_email(token: str) -> str | None:
+    """Ritorna l'email associata al token, o None se non trovata."""
     supabase = _get_supabase()
-
-    # 1. Trova la subscription con questo token
     result = (
         supabase.table("subscriptions")
         .select("email")
@@ -87,31 +113,70 @@ def unsubscribe(token: str = Query(..., description="UUID token di disiscrizione
         .execute()
     )
     rows = result.data or []
+    return rows[0]["email"] if rows else None
 
-    if not rows:
-        return HTMLResponse(
-            content=_page(
-                "Link non valido", "🤔",
-                "Link non valido o già utilizzato",
-                "Non abbiamo trovato nessuna subscription associata a questo link.<br>"
-                "Se pensi sia un errore scrivici a "
-                '<a href="mailto:ciao@lepefy.it">ciao@lepefy.it</a>.'
-            ),
-            status_code=404,
-        )
 
-    email = rows[0]["email"]
+def _page_not_found() -> HTMLResponse:
+    body = """
+      <p>Non abbiamo trovato nessuna subscription associata a questo link.</p>
+      <p style="margin-top:0.5rem;">
+        Se pensi sia un errore scrivici a
+        <a href="mailto:ciao@lepefy.it">ciao@lepefy.it</a>.
+      </p>"""
+    return HTMLResponse(
+        content=_page("Link non valido", "🤔", "Link non valido", body),
+        status_code=404,
+    )
 
-    # 2. Disattiva TUTTE le subscription di quell'email
-    supabase.table("subscriptions").update({"active": False}).eq("email", email).execute()
+
+# ── GET — pagina di conferma ──────────────────────────────────────────────────
+
+@router.get("/unsubscribe", response_class=HTMLResponse, include_in_schema=False)
+def unsubscribe_confirm(token: str = Query(...)):
+    """Mostra la pagina di conferma. Non esegue ancora alcuna azione."""
+    email = _lookup_email(token)
+    if not email:
+        return _page_not_found()
+
+    body = f"""
+      <p>Stai per disiscrivere <strong>{email}</strong> da tutte le notifiche Lepefy.</p>
+      <div class="warning">
+        ⚠️ Questa azione disattiverà <strong>tutte</strong> le tue alert attive.
+        Per riattivarle dovrai iscriverti nuovamente su lepefy.com.
+      </div>
+      <form method="POST" action="/unsubscribe?token={token}">
+        <button type="submit" class="btn-confirm">Sì, disiscrivi questo indirizzo</button>
+      </form>
+      <a href="https://www.lepefy.com" class="btn-cancel">No, torna al sito →</a>"""
 
     return HTMLResponse(
-        content=_page(
-            "Disiscrizione completata", "✅",
-            "Disiscritto con successo",
-            f"L'indirizzo <strong>{email}</strong> non riceverà più notifiche da Lepefy.<br><br>"
-            "Vuoi riscriverti in futuro? Torna su "
-            '<a href="https://www.lepefy.com/abbonati">lepefy.com/abbonati</a>.'
-        ),
+        content=_page("Conferma disiscrizione", "📭", "Vuoi davvero disiscriverti?", body),
+        status_code=200,
+    )
+
+
+# ── POST — azione reale ───────────────────────────────────────────────────────
+
+@router.post("/unsubscribe", response_class=HTMLResponse, include_in_schema=False)
+def unsubscribe_execute(token: str = Query(...)):
+    """Disattiva tutte le subscription dell'email associata al token."""
+    email = _lookup_email(token)
+    if not email:
+        return _page_not_found()
+
+    supabase = _get_supabase()
+    supabase.table("subscriptions").update({"active": False}).eq("email", email).execute()
+
+    body = f"""
+      <p>
+        L'indirizzo <strong>{email}</strong> non riceverà più notifiche da Lepefy.
+      </p>
+      <p style="margin-top:0.75rem;">
+        Vuoi riscriverti in futuro? Torna su
+        <a href="https://www.lepefy.com/abbonati">lepefy.com/abbonati</a>.
+      </p>"""
+
+    return HTMLResponse(
+        content=_page("Disiscrizione completata", "✅", "Disiscritto con successo", body),
         status_code=200,
     )
