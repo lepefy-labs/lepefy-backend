@@ -23,6 +23,8 @@ app = FastAPI(title="Lepefy Backend API")
 
 from app.routers.unsubscribe import router as unsubscribe_router
 app.include_router(unsubscribe_router)
+from app.routers.app_api     import router as app_router
+app.include_router(app_router)
 
 
 # ---------------------------------------------------------------------------
