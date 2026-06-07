@@ -20,11 +20,22 @@ from app.scraper.content_generator        import run_content_job
 from app.scraper.availability_checker     import run_availability_check, run_availability_test
 from app.routers.unsubscribe              import router as unsubscribe_router
 from app.routers.app_api                  import router as app_router
+from fastapi.middleware.cors              import CORSMiddleware
 
 app = FastAPI(title="Lepefy Backend API")
 app.include_router(unsubscribe_router)
 app.include_router(app_router)
-
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://www.lepefy.com",
+        "https://lepefy.com",
+        "http://localhost:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ---------------------------------------------------------------------------
 # Root
