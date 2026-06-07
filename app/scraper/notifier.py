@@ -1,6 +1,7 @@
 import os
 import asyncio
 import httpx
+from datetime import date
 from supabase import create_client, Client
 
 SUPABASE_URL         = os.getenv("SUPABASE_URL")
@@ -10,6 +11,10 @@ EMAIL_CONTACT        = os.getenv("EMAIL_CONTACT", "ciao@lepefy.it")
 EMAIL_FROM           = os.getenv("EMAIL_FROM", "noreply@lepefy.com")
 EMAIL_FROM_NAME      = os.getenv("EMAIL_FROM_NAME", "Lepefy")
 BACKEND_URL          = "https://" + os.getenv("RAILWAY_PUBLIC_DOMAIN", "lepefy-backend-production.up.railway.app")
+
+FREE_WEEKLY_LIMIT = 3
+MAX_DEALS = 6
+MAX_PER_PLATFORM = 3
 
 
 
@@ -83,10 +88,9 @@ def _build_email_html(deals: list[dict], token: str = "") -> str:
           {rischi_html}
         </div>'''
 
-    unsubscribe_html = (
-        f' &nbsp;·&nbsp; <a href="{BACKEND_URL}/unsubscribe?token={token}" style="color:#9ca3af;">Disiscriviti</a>'
-        if token else ""
-    )
+    unsubscribe_html = ""
+    if token:
+        unsubscribe_html = f' · <a href="{BACKEND_URL}/unsubscribe?token={token}" style="color:#9ca3af;">Disiscriviti</a>'
 
     return f"""<!DOCTYPE html>
 <html>
@@ -228,10 +232,8 @@ def _run_notify_job() -> dict:
             reverse=True
         )
 
-        # Bilanciamento piattaforme + limite 5 per email
-        # Max 3 deal dalla stessa piattaforma — garantisce slot a Vinted se only_italy=False
-        MAX_DEALS = 5
-        MAX_PER_PLATFORM = 3
+        # Bilanciamento piattaforme + limite per email
+        # Max deal dalla stessa piattaforma — garantisce slot a Vinted se only_italy=False
         selected = []
         platform_counts: dict[str, int] = {}
         for deal in new_deals:
@@ -245,6 +247,26 @@ def _run_notify_job() -> dict:
             results.append({"email": email, "keyword": keyword, "sent": 0})
             continue
 
+        # ── Free tier: verifica e reset contatore settimanale ──────────────
+        plan = sub.get("plan", "free")
+        count = 0
+        if plan == "free":
+            reset_date = sub.get("notifications_week_reset")
+            today = date.today()
+            if reset_date and (today - date.fromisoformat(str(reset_date))).days >= 7:
+                supabase.table("subscriptions").update({
+                    "notifications_count_week": 0,
+                    "notifications_week_reset": str(today),
+                }).eq("id", sub_id).execute()
+                count = 0
+            else:
+                count = sub.get("notifications_count_week") or 0
+
+            if count >= FREE_WEEKLY_LIMIT:
+                results.append({"email": email, "keyword": keyword, "skipped": "free_tier_limit"})
+                continue
+        # ───────────────────────────────────────────────────────────────────
+
         html = _build_email_html(new_deals, token=token)
         subject = f"🔍 Lepefy — {len(new_deals)} nuovi affari su {keyword}"
 
@@ -253,6 +275,12 @@ def _run_notify_job() -> dict:
         except Exception as e:
             results.append({"email": email, "keyword": keyword, "error": str(e)})
             continue
+
+        # Incrementa contatore solo per utenti free
+        if plan == "free":
+            supabase.table("subscriptions").update({
+                "notifications_count_week": count + 1,
+            }).eq("id", sub_id).execute()
 
         # Registra le notifiche inviate
         log_rows = [
