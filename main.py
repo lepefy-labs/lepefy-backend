@@ -18,12 +18,11 @@ from app.scraper.vinted_collector_scanner import run_vinted_collector_scan
 from app.scraper.notifier_collector       import run_collector_notify_job
 from app.scraper.content_generator        import run_content_job
 from app.scraper.availability_checker     import run_availability_check, run_availability_test
+from app.routers.unsubscribe              import router as unsubscribe_router
+from app.routers.app_api                  import router as app_router
 
 app = FastAPI(title="Lepefy Backend API")
-
-from app.routers.unsubscribe import router as unsubscribe_router
 app.include_router(unsubscribe_router)
-from app.routers.app_api     import router as app_router
 app.include_router(app_router)
 
 
