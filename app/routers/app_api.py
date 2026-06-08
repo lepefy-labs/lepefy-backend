@@ -75,6 +75,7 @@ async def get_feed(
     plan = next(
         (s.get("plan") for s in subs.data if s.get("plan") and s.get("plan") != "free"),
         subs.data[0].get("plan", "free")
+        plan = plan.lower() if plan else "free"
     )
     keywords = [s["keyword"] for s in subs.data]
 
@@ -396,6 +397,7 @@ async def check_plan(email: str):
 
     row = result.data[0]
     plan = row.get("plan", "free")
+    plan = plan.lower() if plan else "free"
 
     if plan != "free":
         return {"plan": plan, "can_notify": True}
