@@ -5,8 +5,7 @@ Autenticazione via Supabase JWT (header: Authorization: Bearer <token>)
 """
 
 import os
-from datetime import date, timedelta
-from uuid import UUID
+from datetime import date
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Depends, Header
@@ -18,7 +17,13 @@ router = APIRouter(prefix="/app", tags=["app"])
 SUPABASE_URL         = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
-FREE_WEEKLY_LIMIT = 3  # notifiche/settimana per utenti free
+FREE_WEEKLY_LIMIT    = 3
+DEFECTIVE_CONDITION  = "Non del tutto funzionante"
+
+DEAL_SELECT = (
+    "id, title, price_value, margine_stimato, score, source, "
+    "location, condition, image_url, url, keyword, created_at, body"
+)
 
 
 def get_supabase() -> Client:
@@ -28,10 +33,6 @@ def get_supabase() -> Client:
 # ─── AUTH HELPER ─────────────────────────────────────────────────────────────
 
 async def get_current_user(authorization: str = Header(...)) -> dict:
-    """
-    Verifica il JWT di Supabase e restituisce i dati utente.
-    Il frontend invia: Authorization: Bearer <supabase_access_token>
-    """
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Token mancante")
     token = authorization.split(" ", 1)[1]
@@ -49,74 +50,123 @@ async def get_current_user(authorization: str = Header(...)) -> dict:
 
 @router.get("/feed")
 async def get_feed(
-    platform: Optional[str] = None,   # "Subito.it" | "Vinted.it"
-    min_score: Optional[int] = None,  # es. 9
-    limit: int = 20,
+    platform: Optional[str] = None,
+    min_score: Optional[int] = None,
+    limit: int = 30,
     user: dict = Depends(get_current_user),
 ):
     """
-    Restituisce i deal recenti da scan_results.
-    Filtrati per keyword attive dell'utente (dalla sua subscription).
+    Restituisce deal da tre query separate:
+    1. Deal normali (flipper) — scored, score >= 7
+    2. Deal difettosi (riparatore) — condition = "Non del tutto funzionante"
+    3. Deal collezionista — keyword con is_collector=True, nessun filtro score
     """
     supabase = get_supabase()
 
-    # Recupera keyword dell'utente
-    subs = (
+    # ── Tutte le subscription dell'utente ─────────────────────────────────────
+    all_subs = (
         supabase.table("subscriptions")
-        .select("keyword, min_threshold, max_threshold, plan")
+        .select("keyword, min_threshold, max_threshold, plan, is_collector, include_defective, source")
         .eq("email", user["email"])
         .eq("active", True)
         .execute()
-    )
+    ).data or []
 
-    if not subs.data:
-        return {"deals": [], "plan": "free"}
+    if not all_subs:
+        return {"deals": [], "plan": "free", "count": 0}
 
+    # Piano — normalizzato lowercase, prende il primo non-free
     plan = next(
-        (s.get("plan") for s in subs.data if s.get("plan") and s.get("plan") != "free"),
-        subs.data[0].get("plan", "free")
+        (s.get("plan") for s in all_subs if s.get("plan") and s.get("plan", "").lower() != "free"),
+        all_subs[0].get("plan", "free")
     )
-    plan = plan.lower() if plan else "free"    
-    keywords = [s["keyword"] for s in subs.data]
+    plan = plan.lower() if plan else "free"
 
-    # Query scan_results
-    query = (
-        supabase.table("scan_results")
-        .select("id, title, price_value, margine_stimato, score, source, location, condition, image_url, url, keyword, created_at, body")
-        .eq("scored", True)
-        .gte("score", min_score or 7)
-        .in_("keyword", keywords)
-        .order("created_at", desc=True)
-        .limit(limit)
-    )
+    # ── 1. Deal normali (flipper) ─────────────────────────────────────────────
+    flipper_subs = [s for s in all_subs if not s.get("is_collector")]
+    flipper_keywords = [s["keyword"] for s in flipper_subs]
 
-    if platform:
-        query = query.eq("source", platform)
+    normal_deals = []
+    if flipper_keywords:
+        normal_query = (
+            supabase.table("scan_results")
+            .select(DEAL_SELECT)
+            .eq("scored", True)
+            .not_.is_("score", "null")
+            .gte("score", min_score or 7)
+            .in_("keyword", flipper_keywords)
+            .order("created_at", desc=True)
+            .limit(limit)
+        )
+        if platform:
+            normal_query = normal_query.eq("source", platform)
+        normal_deals = normal_query.execute().data or []
 
-    results = query.execute()
-    deals = results.data or []
+    # ── 2. Deal difettosi (riparatore) ───────────────────────────────────────
+    defective_deals = []
+    defective_subs = [s for s in all_subs if s.get("include_defective")]
+    if defective_subs:
+        defective_keywords = [s["keyword"] for s in defective_subs]
+        defective_deals = (
+            supabase.table("scan_results")
+            .select(DEAL_SELECT)
+            .eq("scored", True)
+            .is_("score", "null")
+            .eq("source", "Vinted.it")
+            .eq("condition", DEFECTIVE_CONDITION)
+            .in_("keyword", defective_keywords)
+            .order("price_value", desc=False)
+            .limit(10)
+        ).execute().data or []
 
-    # Calcolo margine_pct
-    for d in deals:
+    # ── 3. Deal collezionista ─────────────────────────────────────────────────
+    collector_deals = []
+    collector_subs = [s for s in all_subs if s.get("is_collector")]
+    if collector_subs:
+        for sub in collector_subs:
+            coll_query = (
+                supabase.table("scan_results")
+                .select(DEAL_SELECT)
+                .ilike("keyword", sub["keyword"])
+                .gte("price_value", sub.get("min_threshold") or 0)
+                .lte("price_value", sub.get("max_threshold") or 999999)
+                .order("price_value", desc=False)
+                .limit(10)
+            )
+            if sub.get("source"):
+                coll_query = coll_query.eq("source", sub["source"])
+            collector_deals += coll_query.execute().data or []
+
+        # Deduplica per id
+        seen = set()
+        deduped = []
+        for d in collector_deals:
+            if d["id"] not in seen:
+                seen.add(d["id"])
+                deduped.append(d)
+        collector_deals = deduped
+
+    # ── Unisci: normali + collezionista + difettosi ───────────────────────────
+    all_deals = normal_deals + collector_deals + defective_deals
+
+    # ── Calcolo margine (solo deal con score non null) ────────────────────────
+    for d in all_deals:
         price = d.get("price_value") or 0
         mkt   = d.get("margine_stimato") or 0
-        if price and mkt:
+        if price and mkt and d.get("score") is not None:
             d["margin"]     = round(mkt - price, 2)
             d["margin_pct"] = round(((mkt - price) / mkt) * 100, 1) if mkt else 0
         else:
             d["margin"]     = None
             d["margin_pct"] = None
 
-    return {"deals": deals, "plan": plan, "count": len(deals)}
+    return {"deals": all_deals, "plan": plan, "count": len(all_deals)}
 
 
 # ─── DEAL DETAIL ─────────────────────────────────────────────────────────────
 
 @router.get("/deal/{deal_id}")
-async def get_deal(
-    deal_id: str,
-    user: dict = Depends(get_current_user),
-):
+async def get_deal(deal_id: str, user: dict = Depends(get_current_user)):
     supabase = get_supabase()
     result = (
         supabase.table("scan_results")
@@ -146,33 +196,23 @@ class SaveDealRequest(BaseModel):
 
 
 @router.post("/saved")
-async def save_deal(
-    body: SaveDealRequest,
-    user: dict = Depends(get_current_user),
-):
+async def save_deal(body: SaveDealRequest, user: dict = Depends(get_current_user)):
     supabase = get_supabase()
-    row = {
-        "user_id": user["id"],
-        **body.dict(),
-    }
-    result = supabase.table("saved_deals").insert(row).execute()
+    result = supabase.table("saved_deals").insert({"user_id": user["id"], **body.dict()}).execute()
     return {"saved": True, "id": result.data[0]["id"]}
 
 
 @router.get("/saved")
 async def get_saved_deals(user: dict = Depends(get_current_user)):
     supabase = get_supabase()
-    result = (
+    deals = (
         supabase.table("saved_deals")
         .select("*")
         .eq("user_id", user["id"])
         .order("saved_at", desc=True)
         .execute()
-    )
-    deals = result.data or []
-    total_real_margin = sum(
-        d["real_margin"] for d in deals if d.get("real_margin")
-    )
+    ).data or []
+    total_real_margin = sum(d["real_margin"] for d in deals if d.get("real_margin"))
     bought_count = sum(1 for d in deals if d.get("bought"))
     return {
         "deals": deals,
@@ -192,32 +232,16 @@ class OutcomeRequest(BaseModel):
 
 
 @router.patch("/saved/{saved_id}/outcome")
-async def update_outcome(
-    saved_id: str,
-    body: OutcomeRequest,
-    user: dict = Depends(get_current_user),
-):
+async def update_outcome(saved_id: str, body: OutcomeRequest, user: dict = Depends(get_current_user)):
     supabase = get_supabase()
-
-    real_margin = None
-    if body.bought_at and body.sold_at:
-        real_margin = round(body.sold_at - body.bought_at, 2)
-
-    update_data = {
-        "bought":       body.bought,
-        "bought_at":    body.bought_at,
-        "sold_at":      body.sold_at,
-        "real_margin":  real_margin,
+    real_margin = round(body.sold_at - body.bought_at, 2) if body.bought_at and body.sold_at else None
+    supabase.table("saved_deals").update({
+        "bought": body.bought,
+        "bought_at": body.bought_at,
+        "sold_at": body.sold_at,
+        "real_margin": real_margin,
         "outcome_date": body.outcome_date or str(date.today()),
-    }
-
-    result = (
-        supabase.table("saved_deals")
-        .update(update_data)
-        .eq("id", saved_id)
-        .eq("user_id", user["id"])  # sicurezza: solo i propri
-        .execute()
-    )
+    }).eq("id", saved_id).eq("user_id", user["id"]).execute()
     return {"updated": True, "real_margin": real_margin}
 
 
@@ -239,39 +263,30 @@ class AlertRequest(BaseModel):
 @router.get("/alerts")
 async def get_alerts(user: dict = Depends(get_current_user)):
     supabase = get_supabase()
-    result = (
+    return {"alerts": (
         supabase.table("user_alerts")
         .select("*")
         .eq("user_id", user["id"])
         .order("created_at", desc=True)
         .execute()
-    )
-    return {"alerts": result.data or []}
+    ).data or []}
 
 
 @router.post("/alerts")
-async def create_alert(
-    body: AlertRequest,
-    user: dict = Depends(get_current_user),
-):
+async def create_alert(body: AlertRequest, user: dict = Depends(get_current_user)):
     supabase = get_supabase()
-    row = {
-        "user_id":   user["id"],
-        "keyword":   body.keyword.lower().strip(),
+    result = supabase.table("user_alerts").insert({
+        "user_id": user["id"],
+        "keyword": body.keyword.lower().strip(),
         "max_price": body.max_price,
         "min_score": body.min_score,
-        "active":    True,
-    }
-    result = supabase.table("user_alerts").insert(row).execute()
+        "active": True,
+    }).execute()
     return {"created": True, "id": result.data[0]["id"]}
 
 
 @router.patch("/alerts/{alert_id}")
-async def toggle_alert(
-    alert_id: str,
-    active: bool,
-    user: dict = Depends(get_current_user),
-):
+async def toggle_alert(alert_id: str, active: bool, user: dict = Depends(get_current_user)):
     supabase = get_supabase()
     supabase.table("user_alerts").update({"active": active}).eq("id", alert_id).eq("user_id", user["id"]).execute()
     return {"updated": True}
@@ -288,17 +303,18 @@ async def delete_alert(alert_id: str, user: dict = Depends(get_current_user)):
 
 @router.get("/profile")
 async def get_profile(user: dict = Depends(get_current_user)):
-    """
-    Restituisce le subscription attive dell'utente (keyword config dashboard).
-    """
     supabase = get_supabase()
-    result = (
+    subscriptions = (
         supabase.table("subscriptions")
         .select("*")
         .eq("email", user["email"])
         .execute()
-    )
-    return {"subscriptions": result.data or []}
+    ).data or []
+    # Normalizza piano lowercase
+    for s in subscriptions:
+        if s.get("plan"):
+            s["plan"] = s["plan"].lower()
+    return {"subscriptions": subscriptions}
 
 
 class SubscriptionUpdate(BaseModel):
@@ -311,10 +327,7 @@ class SubscriptionUpdate(BaseModel):
 
 
 @router.patch("/profile/subscription")
-async def update_subscription(
-    body: SubscriptionUpdate,
-    user: dict = Depends(get_current_user),
-):
+async def update_subscription(body: SubscriptionUpdate, user: dict = Depends(get_current_user)):
     supabase = get_supabase()
     update_data = {k: v for k, v in body.dict().items() if v is not None and k != "keyword"}
     supabase.table("subscriptions").update(update_data).eq("email", user["email"]).eq("keyword", body.keyword).execute()
@@ -322,10 +335,7 @@ async def update_subscription(
 
 
 @router.delete("/profile/subscription/{keyword}")
-async def remove_subscription(
-    keyword: str,
-    user: dict = Depends(get_current_user),
-):
+async def remove_subscription(keyword: str, user: dict = Depends(get_current_user)):
     supabase = get_supabase()
     supabase.table("subscriptions").update({"active": False}).eq("email", user["email"]).eq("keyword", keyword).execute()
     return {"deactivated": True}
@@ -334,15 +344,8 @@ async def remove_subscription(
 # ─── MARKET INTEL ─────────────────────────────────────────────────────────────
 
 @router.get("/market")
-async def get_market(
-    keyword: Optional[str] = None,
-    user: dict = Depends(get_current_user),
-):
-    """
-    Legge market_snapshots per keyword. Calcola avg/min/max/trend.
-    """
+async def get_market(keyword: Optional[str] = None, user: dict = Depends(get_current_user)):
     supabase = get_supabase()
-
     query = (
         supabase.table("market_snapshots")
         .select("keyword, categoria, price_value, first_seen_at, is_sold, source")
@@ -353,26 +356,24 @@ async def get_market(
     if keyword:
         query = query.ilike("keyword", f"%{keyword}%")
 
-    result = query.execute()
-    rows = result.data or []
+    rows = query.execute().data or []
 
-    # Aggrega per keyword
     from collections import defaultdict
     groups: dict = defaultdict(list)
     for r in rows:
         if r.get("price_value"):
             groups[r["keyword"]].append(float(r["price_value"]))
 
-    market = {}
-    for kw, prices in groups.items():
-        market[kw] = {
-            "keyword":  kw,
-            "avg":      round(sum(prices) / len(prices), 0),
-            "min":      round(min(prices), 0),
-            "max":      round(max(prices), 0),
-            "volume":   len(prices),
+    market = {
+        kw: {
+            "keyword": kw,
+            "avg":     round(sum(prices) / len(prices), 0),
+            "min":     round(min(prices), 0),
+            "max":     round(max(prices), 0),
+            "volume":  len(prices),
         }
-
+        for kw, prices in groups.items()
+    }
     return {"market": list(market.values())}
 
 
@@ -380,10 +381,6 @@ async def get_market(
 
 @router.get("/plan/{email}")
 async def check_plan(email: str):
-    """
-    Usato internamente dal notifier per verificare il piano e il limite settimanale.
-    Non richiede auth utente — chiamato dal backend con CRON_SECRET.
-    """
     supabase = get_supabase()
     result = (
         supabase.table("subscriptions")
@@ -396,13 +393,11 @@ async def check_plan(email: str):
         return {"plan": "free", "can_notify": False}
 
     row = result.data[0]
-    plan = row.get("plan", "free")
-    plan = plan.lower() if plan else "free"
+    plan = (row.get("plan") or "free").lower()
 
     if plan != "free":
         return {"plan": plan, "can_notify": True}
 
-    # Reset contatore settimanale se necessario
     reset_date = row.get("notifications_week_reset")
     today = date.today()
     if reset_date:
@@ -418,10 +413,9 @@ async def check_plan(email: str):
     else:
         count = row.get("notifications_count_week", 0)
 
-    can_notify = count < FREE_WEEKLY_LIMIT
     return {
         "plan":       plan,
-        "can_notify": can_notify,
+        "can_notify": count < FREE_WEEKLY_LIMIT,
         "used":       count,
         "limit":      FREE_WEEKLY_LIMIT,
     }
