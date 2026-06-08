@@ -74,9 +74,9 @@ async def get_feed(
 
     plan = next(
         (s.get("plan") for s in subs.data if s.get("plan") and s.get("plan") != "free"),
-        subs.data[0].get("plan", "free"),
-        plan = plan.lower() if plan else "free"
+        subs.data[0].get("plan", "free")
     )
+    plan = plan.lower() if plan else "free"    
     keywords = [s["keyword"] for s in subs.data]
 
     # Query scan_results
