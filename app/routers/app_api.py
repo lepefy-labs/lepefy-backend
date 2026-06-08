@@ -72,7 +72,10 @@ async def get_feed(
     if not subs.data:
         return {"deals": [], "plan": "free"}
 
-    plan = subs.data[0].get("plan", "free")
+    plan = next(
+        (s.get("plan") for s in subs.data if s.get("plan") and s.get("plan") != "free"),
+        subs.data[0].get("plan", "free")
+    )
     keywords = [s["keyword"] for s in subs.data]
 
     # Query scan_results
