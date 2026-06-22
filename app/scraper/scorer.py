@@ -205,16 +205,41 @@ def _run_score_job() -> dict:
     """
     supabase = _get_supabase()
 
-    # Legge batch di annunci non ancora scorati
-    response = (
+    # Legge batch bilanciato: metà Subito.it, metà Vinted.it
+    half = SCORE_BATCH_SIZE // 2
+    subito_limit = half
+    vinted_limit = SCORE_BATCH_SIZE - half  # riceve il record extra se dispari
+
+    subito_resp = (
         supabase.table("scan_results")
         .select("*")
         .eq("scored", False)
-        .order("created_at", desc=False)  # prima i più vecchi
-        .limit(SCORE_BATCH_SIZE)
+        .eq("source", "Subito.it")
+        .order("created_at", desc=False)
+        .limit(subito_limit)
         .execute()
     )
-    ads = response.data or []
+    vinted_resp = (
+        supabase.table("scan_results")
+        .select("*")
+        .eq("scored", False)
+        .eq("source", "Vinted.it")
+        .order("created_at", desc=False)
+        .limit(vinted_limit)
+        .execute()
+    )
+
+    subito_ads = subito_resp.data or []
+    vinted_ads = vinted_resp.data or []
+
+    # Interleave: alterna un elemento Subito e uno Vinted
+    ads = []
+    for s, v in zip(subito_ads, vinted_ads):
+        ads.append(s)
+        ads.append(v)
+    min_len = min(len(subito_ads), len(vinted_ads))
+    ads.extend(subito_ads[min_len:])
+    ads.extend(vinted_ads[min_len:])
 
     if not ads:
         return {"status": "ok", "message": "Nessun annuncio da scorare"}
